@@ -1,0 +1,13 @@
+Million RPS Battle
+
+Smoothly growing number of connections (0..10k) with 100 RPS of short messages each.
+2 hosts on a switch: tester and server.
+Reply ASAP.
+
+Different programming language solutions.
+Short and typical.
+
+Million RPS at all.
+We calculate connection time, latency and errors rates and make the Rating.
+
+For fun.
