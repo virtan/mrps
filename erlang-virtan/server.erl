@@ -32,7 +32,6 @@ bind(Sock) ->
 
 handle(Sock) ->
     receive {tcp, Sock, Data} -> gen_tcp:send(Sock, Data), handle(Sock);
-        _ -> error
-    after ?TIMEOUT -> error
-    end,
-    gen_tcp:close(Sock).
+        _ -> gen_tcp:close(Sock), error
+    after ?TIMEOUT -> gen_tcp:close(Sock), error
+    end.
