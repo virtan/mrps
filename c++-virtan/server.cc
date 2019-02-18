@@ -5,6 +5,7 @@
 #include <functional>
 #include <thread>
 #include <type_traits>
+#include <algorithm>
 #include <boost/asio.hpp>
 
 template <typename Context>
@@ -40,15 +41,17 @@ public:
   }
 
   void* allocate(std::size_t size) {
-    if (in_use_ || size > alloc_size)
-      return 0;
+    if (in_use_ || size > alloc_size) {
+        return 0;
+    }
     in_use_ = true;
     return std::addressof(storage_);
   }
 
   void deallocate(void* p) {
-    if (p)
-      in_use_ = false;
+    if (p) {
+        in_use_ = false;
+    }
   }
 
 private:
@@ -69,16 +72,18 @@ public:
     allocator_(std::addressof(allocator)), handler_(std::forward<H>(handler)) {}
 
   friend void* asio_handler_allocate(std::size_t size, this_type* context) {
-    if (void* p = context->allocator_->allocate(size))
+    if (void* p = context->allocator_->allocate(size)) {
       return p;
+    }
     return allocate(size, context->handler_);
   }
 
   friend void asio_handler_deallocate(void* pointer, std::size_t size, this_type* context) {
-    if (context->allocator_->owns(pointer))
+    if (context->allocator_->owns(pointer)) {
       context->allocator_->deallocate(pointer);
-    else
+    } else {
       deallocate(pointer, size, context->handler_);
+    }
   }
 
   template <typename Function>
@@ -139,19 +144,21 @@ public:
 
 private:
   void read(const boost::system::error_code& e, std::size_t bytes_transferred) {
-    if (e)
+    if (e) {
       delete this;
-    else
+    } else {
       boost::asio::async_write(socket_, boost::asio::buffer(data_, bytes_transferred),
           make_custom_alloc_handler(allocator_, std::bind(&connection::write, this,
               std::placeholders::_1)));
+    }
   }
 
   void write(const boost::system::error_code &e) {
-    if (e)
+    if (e) {
       delete this;
-    else
+    } else {
       start();
+    }
   }
 
   handler_allocator<128> allocator_;
@@ -182,10 +189,11 @@ private:
   }
 
   void accept(connection *c, const boost::system::error_code& e) {
-    if (e)
+    if (e) {
       delete c;
-    else
+    } else {
       c->start();
+    }
     start_accept();
   }
 
@@ -194,28 +202,26 @@ private:
   handler_allocator<256> allocator_;
 };
 
-void servicing(boost::asio::ip::tcp::acceptor::native_handle_type native_acceptor) {
-  boost::asio::io_service service(1);
-  acceptor a(service, native_acceptor);
-  service.run();
-}
-
 int main(int args, char** argv) {
   if(args < 2) {
     std::cout << "Usage: " << argv[0] << " <port> [threads = 24]" << std::endl;
     return 1;
   }
   unsigned short port = std::atoi(argv[1]);
-  std::size_t threads = args > 2 ? std::atoi(argv[2]) : 24;
-  std::vector<std::thread> vthreads;
-  vthreads.reserve(threads);
+  std::size_t thread_num = args > 2 ? std::atoi(argv[2]) : 24;
+  std::vector<std::thread> threads;
+  threads.reserve(thread_num);
   boost::asio::io_service fake_s;
   boost::asio::ip::tcp::acceptor fake_a(fake_s, boost::asio::ip::tcp::endpoint(
       boost::asio::ip::tcp::v4(), port));
   auto native_handle = fake_a.native_handle();
-  for (std::size_t i = 0; i < threads; ++i)
-    vthreads.emplace_back(std::bind(servicing, native_handle));
-  for (std::size_t i = 0; i < threads; ++i)
-    vthreads[i].join();
+  for (std::size_t i = 0; i < thread_num; ++i) {
+    threads.emplace_back([native_handle]() {
+      boost::asio::io_service service(1);
+      acceptor a(service, native_handle);
+      service.run();
+    });
+  }
+  std::for_each(threads.begin(), threads.end(), std::mem_fn(&std::thread::join));
   return 0;
 }
