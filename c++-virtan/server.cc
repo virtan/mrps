@@ -32,7 +32,7 @@ private:
   handler_allocator& operator=(const handler_allocator&) = delete;
 
 public:
-  handler_allocator(const handler_allocator&) : in_use_(false) {}
+  handler_allocator() : in_use_(false) {}
   ~handler_allocator() = default;
 
   bool owns(void* p) const {
@@ -83,7 +83,7 @@ public:
 
   template <typename Function>
   friend void asio_handler_invoke(Function&& function, this_type* context) {
-    invoke(detail::forward<Function>(function), context->handler_);
+    invoke(std::forward<Function>(function), context->handler_);
   }
 
   template <typename Function>
@@ -130,7 +130,7 @@ public:
   void start() {
     socket_.async_read_some(boost::asio::buffer(data_, max_length),
         make_custom_alloc_handler(allocator_, std::bind(&connection::read, this,
-            boost::asio::placeholders::error, boost::asio::placeholders::bytes_transferred)));
+            std::placeholders::_1, std::placeholders::_2)));
   }
 
   boost::asio::ip::tcp::socket& socket() {
@@ -144,7 +144,7 @@ private:
     else
       boost::asio::async_write(socket_, boost::asio::buffer(data_, bytes_transferred),
           make_custom_alloc_handler(allocator_, std::bind(&connection::write, this,
-              boost::asio::placeholders::error));
+              std::placeholders::_1)));
   }
 
   void write(const boost::system::error_code &e) {
@@ -178,7 +178,7 @@ private:
   void start_accept() {
     connection *c = new connection(service_);
     acceptor_.async_accept(c->socket(), make_custom_alloc_handler(allocator_,
-      std::bind(&acceptor::accept, this, c, boost::asio::placeholders::error)));
+        std::bind(&acceptor::accept, this, c, std::placeholders::_1)));
   }
 
   void accept(connection *c, const boost::system::error_code& e) {
@@ -195,20 +195,20 @@ private:
 };
 
 void servicing(boost::asio::ip::tcp::acceptor::native_handle_type native_acceptor) {
-  boost::asio::io_service service(BOOST_ASIO_CONCURRENCY_HINT_UNSAFE_IO)
-  acceptor a(native_acceptor);
+  boost::asio::io_service service(1);
+  acceptor a(service, native_acceptor);
   service.run();
 }
 
-int main(int args, char **argv) {
+int main(int args, char** argv) {
   if(args < 2) {
-    cout << "Usage: " << argv[0] << " <port> [threads = 24]" << endl;
+    std::cout << "Usage: " << argv[0] << " <port> [threads = 24]" << std::endl;
     return 1;
   }
-  unsigned short port = atoi(argv[1]);
-  std::size_t threads = args > 2 ? atoi(argv[2]) : 24;
+  unsigned short port = std::atoi(argv[1]);
+  std::size_t threads = args > 2 ? std::atoi(argv[2]) : 24;
   std::vector<std::thread> vthreads;
-  vthreads.reserve(threads)
+  vthreads.reserve(threads);
   boost::asio::io_service fake_s;
   boost::asio::ip::tcp::acceptor fake_a(fake_s, boost::asio::ip::tcp::endpoint(
       boost::asio::ip::tcp::v4(), port));
