@@ -6,7 +6,7 @@ set(Boost_USE_MULTITHREADED ON)
 find_package(Boost REQUIRED thread system)
 find_package(Threads REQUIRED)
 
-add_executable(${PROJECT_NAME} "server.cc")
+add_executable(${PROJECT_NAME} "client.cc")
 target_compile_options(${PROJECT_NAME}
     PRIVATE
     "-std=c++17"
