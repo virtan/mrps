@@ -4,6 +4,7 @@
 #include <queue>
 #include <functional>
 #include <thread>
+#include <chrono>
 #include <boost/asio.hpp>
 
 const std::size_t clients_max = 10000;
@@ -193,7 +194,7 @@ int main(int args, char **argv) {
     vthreads = new std::thread[threads_];
     services = new boost::asio::io_service[threads_];
     for(std::size_t i = 0; i < threads_; ++i) vthreads[i] = std::thread(servicing, i);
-    sleep(1);
+    std::this_thread::sleep_for(std::chrono::seconds(1));
     std::cout << "Starting tests" << std::endl;
     boost::asio::ip::tcp::resolver resolver(services[0]);
     boost::asio::ip::tcp::resolver::query query(host, port);
@@ -201,7 +202,7 @@ int main(int args, char **argv) {
     new connection_handler;
     for(std::size_t i = 0; i < 60; i += 5) {
         print_stat();
-        sleep(5);
+        std::this_thread::sleep_for(std::chrono::seconds(5));
     }
     print_stat(true);
     return 0;
