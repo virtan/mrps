@@ -12,9 +12,9 @@ RUN apk add --no-cache libstdc++ &&\
     cmake -D CMAKE_SKIP_BUILD_RPATH=ON -D CMAKE_BUILD_TYPE=Release .. &&\
     cmake --build . &&\
     mkdir -p /opt/cpp-virtan &&\
-    mv -f client /opt/cpp-virtan/client &&\
+    mv -f server /opt/cpp-virtan/server &&\
     cd /tmp &&\
     rm -rf cpp-virtan &&\
     apk del build-dependencies
 
-ENTRYPOINT ["/opt/cpp-virtan/client"]
+ENTRYPOINT ["/opt/cpp-virtan/server"]
