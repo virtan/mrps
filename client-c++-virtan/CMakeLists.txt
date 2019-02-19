@@ -3,7 +3,7 @@ project(client)
 
 set(Boost_USE_STATIC_LIBS ON)
 set(Boost_USE_MULTITHREADED ON)
-find_package(Boost REQUIRED thread system)
+find_package(Boost REQUIRED date_time system)
 find_package(Threads REQUIRED)
 
 add_executable(${PROJECT_NAME} "client.cc")
