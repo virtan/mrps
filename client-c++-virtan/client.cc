@@ -55,29 +55,32 @@ private:
   std::chrono::steady_clock::time_point start_time;
 };
 
-struct connection_handler {
+class connection_handler : public std::enable_shared_from_this<connection_handler> {
+public:
   connection_handler() :
     service_id(++services_i),
     my_service(*services[service_id % thread_num]),
     s(my_service),
     bear_tmr(my_service, boost::posix_time::microseconds(bear_after_mcs)),
     exch_tmr(my_service),
-    errored(false)
-  {
+    errored(false) {}
+
+  void start() {
     if (service_id >= clients_max) {
       return;
     }
     bear_tmr.async_wait(std::bind(
-        &connection_handler::new_connection_handler, this, std::placeholders::_1));
+        &connection_handler::new_connection_handler, shared_from_this(), std::placeholders::_1));
     connect_timer.reset();
     ++connection_active;
     boost::asio::async_connect(s, connect_to, std::bind(
-        &connection_handler::connect, this, std::placeholders::_1));
+        &connection_handler::connect, shared_from_this(), std::placeholders::_1));
   }
 
+private:
   void new_connection_handler(const boost::system::error_code& e) {
     assert(!e);
-    new connection_handler;
+    std::make_shared<connection_handler>()->start();
   }
 
   void connect(const boost::system::error_code& e) {
@@ -111,10 +114,10 @@ struct connection_handler {
     }
     exch_tmr.expires_from_now(boost::posix_time::microseconds(rand() % (2 * send_each_mcs)));
     exch_tmr.async_wait(std::bind(
-        &connection_handler::send_staff, this, std::placeholders::_1));
+        &connection_handler::send_staff, shared_from_this(), std::placeholders::_1));
     tqueue.push(timer());
     boost::asio::async_write(s, boost::asio::mutable_buffers_1(send_buf, 32), std::bind(
-        &connection_handler::stub, this, std::placeholders::_1));
+        &connection_handler::stub, shared_from_this(), std::placeholders::_1));
   }
 
   void stub(const boost::system::error_code& e) {
@@ -139,7 +142,7 @@ struct connection_handler {
     }
     memset(read_buf, 0, 33);
     boost::asio::async_read(s, boost::asio::mutable_buffers_1(read_buf, 32), std::bind(
-        &connection_handler::compare_staff, this, std::placeholders::_1, std::placeholders::_2));
+        &connection_handler::compare_staff, shared_from_this(), std::placeholders::_1, std::placeholders::_2));
   }
 
   void compare_staff(const boost::system::error_code& e, std::size_t transferred) {
@@ -209,7 +212,7 @@ int main(int args, char** argv) {
   boost::asio::ip::tcp::resolver resolver(*services[0]);
   boost::asio::ip::tcp::resolver::query query(host, port);
   connect_to = resolver.resolve(query);
-  new connection_handler;
+  std::make_shared<connection_handler>()->start();
   for (std::size_t i = 0; i < 60; i += 5) {
     print_stat();
     std::this_thread::sleep_for(std::chrono::seconds(5));
