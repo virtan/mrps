@@ -32,28 +32,26 @@ std::atomic_size_t latency_summ_mcs(0);
 std::atomic_size_t msgs(0);
 
 class timer {
-  public:
-    timer() {
-      reset(); 
-    }
+public:
+  timer() {
+    reset();
+  }
 
-    void start() { 
-      gettimeofday(&start_time, NULL); 
-    }
+  void start() {
+    start_time = std::chrono::steady_clock::now();
+  }
 
-    std::size_t current() {
-      struct timeval now;
-      gettimeofday(&now, NULL);
-      std::size_t diff = (((std::size_t) now.tv_sec) * 1000000) + now.tv_usec - (((std::size_t) start_time.tv_sec) * 1000000) - start_time.tv_usec;
-      return diff;
-    }
+  std::size_t current() {
+    auto now = std::chrono::steady_clock::now();
+    return std::chrono::duration_cast<std::chrono::microseconds>(now - start_time).count();
+  }
 
-    void reset() {
-      start();
-    }
+  void reset() {
+    start();
+  }
 
-  private:
-    struct timeval start_time;
+private:
+  std::chrono::steady_clock::time_point start_time;
 };
 
 struct connection_handler {
