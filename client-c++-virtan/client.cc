@@ -192,7 +192,7 @@ int main(int args, char** argv) {
   }
   std::string host = argv[1];
   std::string port = args > 2 ? argv[2] : "32000";
-  thread_num = static_cast<std::size_t>(args > 3 ? std::atoi(argv[3]) : 24);
+  thread_num = args > 3 ? std::atoi(argv[3]) : 24;
   std::vector<std::thread> threads;
   threads.reserve(thread_num);
   services.reserve(thread_num);
