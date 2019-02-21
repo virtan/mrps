@@ -8,6 +8,7 @@
 #include <memory>
 #include <memory>
 #include <cstdlib>
+#include <algorithm>
 #include <boost/asio.hpp>
 
 namespace {
@@ -213,6 +214,10 @@ int main(int args, char** argv) {
     print_stat();
     std::this_thread::sleep_for(std::chrono::seconds(5));
   }
+  std::for_each(services.begin(), services.end(), [](std::unique_ptr<boost::asio::io_service>& s) {
+    s->stop();
+  });
+  std::for_each(threads.begin(), threads.end(), std::mem_fn(&std::thread::join));
   print_stat(true);
   return EXIT_SUCCESS;
 }
