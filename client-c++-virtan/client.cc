@@ -10,6 +10,8 @@
 #include <cstdlib>
 #include <boost/asio.hpp>
 
+namespace {
+
 const std::size_t clients_max = 10000;
 const std::size_t bear_after_mcs = 1000;
 const std::size_t send_each_mcs = 10000;
@@ -70,7 +72,7 @@ struct connection_handler {
         &connection_handler::new_connection_handler, this, std::placeholders::_1));
     connect_timer.reset();
     ++connection_active;
-    async_connect(s, connect_to, std::bind(
+    boost::asio::async_connect(s, connect_to, std::bind(
         &connection_handler::connect, this, std::placeholders::_1));
   }
 
@@ -112,7 +114,7 @@ struct connection_handler {
     exch_tmr.async_wait(std::bind(
         &connection_handler::send_staff, this, std::placeholders::_1));
     tqueue.push(timer());
-    async_write(s, boost::asio::mutable_buffers_1(send_buf, 32), std::bind(
+    boost::asio::async_write(s, boost::asio::mutable_buffers_1(send_buf, 32), std::bind(
         &connection_handler::stub, this, std::placeholders::_1));
   }
 
@@ -137,7 +139,7 @@ struct connection_handler {
       return;
     }
     memset(read_buf, 0, 33);
-    async_read(s, boost::asio::mutable_buffers_1(read_buf, 32), std::bind(
+    boost::asio::async_read(s, boost::asio::mutable_buffers_1(read_buf, 32), std::bind(
         &connection_handler::compare_staff, this, std::placeholders::_1, std::placeholders::_2));
   }
 
@@ -183,6 +185,8 @@ void print_stat(bool final = false) {
   std::cout << "Chld: " << children << " ConnErr: " << (final ? connection_errors + connection_active : static_cast<std::size_t>(connection_errors)) << " ExchErr: " << exchange_errors << " ConnAvg: " << (((double) conn_avg) / 1000) << "ms LatAvg: " << (((double) lat_avg) / 1000) << "ms  Msgs: " << msgs << "\n";
 }
 
+} // anonymous namespace
+
 int main(int args, char** argv) {
   if (args < 2) {
     std::cout << "Usage: " << argv[0] << " <host> [port = 32000 [threads = 24]]" << std::endl;
@@ -190,7 +194,7 @@ int main(int args, char** argv) {
   }
   std::string host = argv[1];
   std::string port = args > 2 ? argv[2] : "32000";
-  thread_num = args > 3 ? std::atoi(argv[3]) : 24;
+  thread_num = static_cast<std::size_t>(args > 3 ? std::atoi(argv[3]) : 24);
   std::vector<std::thread> threads;
   threads.reserve(thread_num);
   services.reserve(thread_num);
