@@ -6,6 +6,7 @@
 #include <thread>
 #include <type_traits>
 #include <algorithm>
+#include <cstdlib>
 #include <boost/asio.hpp>
 
 template <typename Context>
@@ -205,7 +206,7 @@ private:
 int main(int args, char** argv) {
   if(args < 2) {
     std::cout << "Usage: " << argv[0] << " <port> [threads = 24]" << std::endl;
-    return 1;
+    return EXIT_FAILURE;
   }
   unsigned short port = std::atoi(argv[1]);
   std::size_t thread_num = args > 2 ? std::atoi(argv[2]) : 24;
@@ -223,5 +224,5 @@ int main(int args, char** argv) {
     });
   }
   std::for_each(threads.begin(), threads.end(), std::mem_fn(&std::thread::join));
-  return 0;
+  return EXIT_SUCCESS;
 }
