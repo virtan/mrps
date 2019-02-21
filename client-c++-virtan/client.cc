@@ -16,7 +16,7 @@ namespace {
 const std::size_t clients_max = 10000;
 const std::size_t bear_after_mcs = 1000;
 const std::size_t send_each_mcs = 10000;
-const std::size_t client_timeout_mcs = 30*1000*1000;
+const std::size_t client_timeout_mcs = 30 * 1000 * 1000;
 
 std::size_t thread_num;
 
