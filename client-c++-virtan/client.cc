@@ -4,6 +4,7 @@
 #include <queue>
 #include <functional>
 #include <thread>
+#include <type_traits>
 #include <chrono>
 #include <memory>
 #include <memory>
@@ -14,6 +15,121 @@
 
 namespace {
 
+template <typename Context>
+void* allocate(std::size_t size, Context& context) {
+  using namespace boost::asio;
+  return asio_handler_allocate(size, std::addressof(context));
+}
+
+template <typename Context>
+void deallocate(void* pointer, std::size_t size, Context& context) {
+  using namespace boost::asio;
+  asio_handler_deallocate(pointer, size, std::addressof(context));
+}
+
+template <typename Function, typename Context>
+void invoke(Function&& function, Context& context) {
+  using namespace boost::asio;
+  asio_handler_invoke(std::forward<Function>(function), std::addressof(context));
+}
+
+template <std::size_t alloc_size>
+class handler_allocator {
+private:
+  handler_allocator(const handler_allocator&) = delete;
+  handler_allocator& operator=(const handler_allocator&) = delete;
+
+public:
+  handler_allocator() : in_use_(false) {}
+  ~handler_allocator() = default;
+
+  bool owns(void* p) const {
+    return std::addressof(storage_) == p;
+  }
+
+  void* allocate(std::size_t size) {
+    if (in_use_ || size > alloc_size) {
+      return 0;
+    }
+    in_use_ = true;
+    return std::addressof(storage_);
+  }
+
+  void deallocate(void* p) {
+    if (p) {
+      in_use_ = false;
+    }
+  }
+
+private:
+  typename std::aligned_storage<alloc_size>::type storage_;
+  bool in_use_;
+};
+
+template <typename Allocator, typename Handler>
+class custom_alloc_handler {
+private:
+  typedef custom_alloc_handler<Allocator, Handler> this_type;
+
+public:
+  typedef void result_type;
+
+  template <typename H>
+  custom_alloc_handler(Allocator& allocator, H&& handler):
+      allocator_(std::addressof(allocator)), handler_(std::forward<H>(handler)) {}
+
+  friend void* asio_handler_allocate(std::size_t size, this_type* context) {
+    if (void* p = context->allocator_->allocate(size)) {
+      return p;
+    }
+    return allocate(size, context->handler_);
+  }
+
+  friend void asio_handler_deallocate(void* pointer, std::size_t size, this_type* context) {
+    if (context->allocator_->owns(pointer)) {
+      context->allocator_->deallocate(pointer);
+    } else {
+      deallocate(pointer, size, context->handler_);
+    }
+  }
+
+  template <typename Function>
+  friend void asio_handler_invoke(Function&& function, this_type* context) {
+    invoke(std::forward<Function>(function), context->handler_);
+  }
+
+  template <typename Function>
+  friend void asio_handler_invoke(Function& function, this_type* context) {
+    invoke(function, context->handler_);
+  }
+
+  template <typename Function>
+  friend void asio_handler_invoke(const Function& function, this_type* context) {
+    invoke(function, context->handler_);
+  }
+
+  template <typename... Arg>
+  void operator()(Arg&&... arg) {
+    handler_(std::forward<Arg>(arg)...);
+  }
+
+  template <typename... Arg>
+  void operator()(Arg&&... arg) const {
+    handler_(std::forward<Arg>(arg)...);
+  }
+
+private:
+  Allocator* allocator_;
+  Handler handler_;
+};
+
+template <typename Allocator, typename Handler>
+custom_alloc_handler<Allocator, typename std::decay<Handler>::type>
+make_custom_alloc_handler(Allocator& allocator, Handler&& handler) {
+  typedef typename std::decay<Handler>::type handler_type;
+  return custom_alloc_handler<Allocator, handler_type>(allocator, std::forward<Handler>(handler));
+}
+
 const std::size_t clients_max = 10000;
 const std::size_t bear_after_mcs = 1000;
 const std::size_t send_each_mcs = 10000;
@@ -23,7 +139,7 @@ const std::size_t buffer_size = 32;
 std::size_t thread_num;
 
 std::vector<std::unique_ptr<boost::asio::io_service>> services;
-std::atomic_size_t services_i(0);
+std::atomic_size_t services_index(0);
 boost::asio::ip::tcp::resolver::iterator connect_to;
 
 std::atomic_size_t children(0);
@@ -60,42 +176,45 @@ private:
 class connection_handler : public std::enable_shared_from_this<connection_handler> {
 public:
   explicit connection_handler(const std::mt19937& rand_engine) :
-    service_id_(++services_i),
+    service_id_(++services_index),
     my_service_(*services[service_id_ % thread_num]),
     socket_(my_service_),
     bear_timer_(my_service_, boost::posix_time::microseconds(bear_after_mcs)),
-    exch_timer_(my_service_),
+    exchange_timer_(my_service_),
     errored_(false),
-    send_in_progress_(false),
-    start_send_when_send_completes_(false),
+    write_in_progress_(false),
+    start_write_when_write_completes_(false),
     exchange_timer_wait_in_progress_(false),
     start_exchange_timer_wait_when_wait_completes_(false),
     rand_engine_(rand_engine),
     data_rand_(0, RAND_MAX),
     exchange_rand_(0, send_each_mcs) {
-    std::fill(send_buf_.begin(), send_buf_.end() - 1, data_rand_(rand_engine_));
-    *(send_buf_.rbegin()) = '\n';
+    std::fill(write_buf_.begin(), write_buf_.end() - 1, data_rand_(rand_engine_));
+    *(write_buf_.rbegin()) = '\n';
   }
 
   void start() {
     if (service_id_ >= clients_max) {
       return;
     }
-    bear_timer_.async_wait(std::bind(
-        &connection_handler::new_connection_handler, shared_from_this(), std::placeholders::_1));
+    bear_timer_.async_wait(make_custom_alloc_handler(bear_timer_allocator_,
+        std::bind(&connection_handler::start_new_connection, shared_from_this(),
+            std::placeholders::_1)));
     connect_timer_.reset();
     ++connection_active;
-    boost::asio::async_connect(socket_, connect_to, std::bind(
-        &connection_handler::connect, shared_from_this(), std::placeholders::_1));
+    boost::asio::async_connect(socket_, connect_to, make_custom_alloc_handler(
+        write_allocator_, std::bind(&connection_handler::handle_connect,
+            shared_from_this(), std::placeholders::_1)));
   }
 
 private:
-  void new_connection_handler(const boost::system::error_code& e) {
-    assert(!e);
-    std::make_shared<connection_handler>(rand_engine_)->start();
+  void start_new_connection(const boost::system::error_code& e) {
+    if (!e) {
+      std::make_shared<connection_handler>(rand_engine_)->start();
+    }
   }
 
-  void connect(const boost::system::error_code& e) {
+  void handle_connect(const boost::system::error_code& e) {
     ++children;
     --connection_active;
     if (e) {
@@ -114,24 +233,27 @@ private:
     socket_.set_option(boost::asio::ip::tcp::no_delay(true));
     socket_.set_option(boost::asio::socket_base::linger(true, 0));
     start_read();
-    start_send();
+    start_write();
   }
 
-  void start_send() {
-    if (send_in_progress_) {
-      start_send_when_send_completes_ = true;
+  void start_write() {
+    if (write_in_progress_) {
+      start_write_when_write_completes_ = true;
       return;
     }
-    exch_timer_.expires_from_now(boost::posix_time::microseconds(exchange_rand_(rand_engine_)));
+    exchange_timer_.expires_from_now(boost::posix_time::microseconds(
+        exchange_rand_(rand_engine_)));
     start_exchange_timer_wait();
     timer_queue_.push(timer());
-    boost::asio::async_write(socket_, boost::asio::buffer(send_buf_), std::bind(
-        &connection_handler::handle_send, shared_from_this(), std::placeholders::_1));
-    send_in_progress_ = true;
+    boost::asio::async_write(socket_, boost::asio::buffer(write_buf_),
+        make_custom_alloc_handler(write_allocator_, std::bind(
+            &connection_handler::handle_write, shared_from_this(),
+            std::placeholders::_1)));
+    write_in_progress_ = true;
   }
 
-  void handle_send(const boost::system::error_code& e) {
-    send_in_progress_ = false;
+  void handle_write(const boost::system::error_code& e) {
+    write_in_progress_ = false;
     if (errored_) {
       return;
     }
@@ -141,9 +263,9 @@ private:
       stop_operations();
       return;
     }
-    if (start_send_when_send_completes_) {
-      start_send_when_send_completes_ = false;
-      start_send();
+    if (start_write_when_write_completes_) {
+      start_write_when_write_completes_ = false;
+      start_write();
     }
   }
 
@@ -163,7 +285,7 @@ private:
       return;
     }
     if (e != boost::asio::error::operation_aborted) {
-      start_send();
+      start_write();
     }
   }
 
@@ -172,8 +294,9 @@ private:
       start_exchange_timer_wait_when_wait_completes_ = true;
       return;
     }
-    exch_timer_.async_wait(std::bind(&connection_handler::handle_exchange_timer,
-        shared_from_this(), std::placeholders::_1));
+    exchange_timer_.async_wait(make_custom_alloc_handler(exchange_timer_allocator_,
+        std::bind(&connection_handler::handle_exchange_timer, shared_from_this(),
+            std::placeholders::_1)));
     exchange_timer_wait_in_progress_ = true;
   }
 
@@ -182,15 +305,18 @@ private:
       return;
     }
     std::fill(read_buf_.begin(), read_buf_.end(), 0);
-    boost::asio::async_read(socket_, boost::asio::buffer(read_buf_), std::bind(
-        &connection_handler::handle_read, shared_from_this(), std::placeholders::_1, std::placeholders::_2));
+    boost::asio::async_read(socket_, boost::asio::buffer(read_buf_),
+        make_custom_alloc_handler(read_allocator_, std::bind(
+            &connection_handler::handle_read, shared_from_this(),
+            std::placeholders::_1, std::placeholders::_2)));
   }
 
   void handle_read(const boost::system::error_code& e, std::size_t transferred) {
     if (errored_) {
       return;
     }
-    if (e || transferred != 32 || !std::equal(send_buf_.begin(), send_buf_.end(),
+    if (e || transferred != 32 || !std::equal(
+        write_buf_.begin(), write_buf_.end(),
         read_buf_.begin(), read_buf_.end())) {
       errored_ = true;
       ++exchange_errors;
@@ -213,26 +339,30 @@ private:
   void stop_operations() {
     boost::system::error_code ignored;
     socket_.close(ignored);
-    exch_timer_.cancel(ignored);
+    exchange_timer_.cancel(ignored);
   }
 
   std::size_t service_id_;
   boost::asio::io_service& my_service_;
   boost::asio::ip::tcp::socket socket_;
   boost::asio::deadline_timer bear_timer_;
-  boost::asio::deadline_timer exch_timer_;
-  std::array<char, buffer_size> send_buf_;
+  boost::asio::deadline_timer exchange_timer_;
+  std::array<char, buffer_size> write_buf_;
   std::array<char, buffer_size> read_buf_;
   timer connect_timer_;
   bool errored_;
-  bool send_in_progress_;
-  bool start_send_when_send_completes_;
+  bool write_in_progress_;
+  bool start_write_when_write_completes_;
   bool exchange_timer_wait_in_progress_;
   bool start_exchange_timer_wait_when_wait_completes_;
   std::queue<timer> timer_queue_;
   std::mt19937 rand_engine_;
   std::uniform_int_distribution<int> data_rand_;
   std::uniform_int_distribution<int> exchange_rand_;
+  handler_allocator<256> bear_timer_allocator_;
+  handler_allocator<256> write_allocator_;
+  handler_allocator<256> read_allocator_;
+  handler_allocator<256> exchange_timer_allocator_;
 };
 
 void print_stat(bool final = false) {
