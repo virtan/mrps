@@ -380,7 +380,7 @@ private:
 
 void print_stat(bool final = false) {
   if (final) {
-    std::cout << "\nFinal statistics:\n";
+    std::cout << "\nFinal statistics: ";
   }
   std::size_t conn_avg = connection_sum_mcs / (std::max)((std::size_t) children - connection_errors, (std::size_t) 1);
   std::size_t lat_avg = latency_sum_mcs / (std::max)((std::size_t) msgs, (std::size_t) 1);
