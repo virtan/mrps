@@ -7,7 +7,7 @@
 #include <type_traits>
 #include <chrono>
 #include <memory>
-#include <memory>
+#include <array>
 #include <cstdlib>
 #include <random>
 #include <algorithm>
