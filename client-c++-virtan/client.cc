@@ -18,6 +18,7 @@ const std::size_t clients_max = 10000;
 const std::size_t bear_after_mcs = 1000;
 const std::size_t send_each_mcs = 10000;
 const std::size_t client_timeout_mcs = 30 * 1000 * 1000;
+const std::size_t buffer_size = 32;
 
 std::size_t thread_num;
 
@@ -102,10 +103,8 @@ private:
       return;
     }
     connection_summ_mcs += spent_mcs;
-    memset(send_buf_, ' ', 32);
-    snprintf(send_buf_, 32, "%d", data_rand_(rand_engine_));
-    send_buf_[31] = '\n';
-    send_buf_[32] = 0;
+    std::fill(send_buf_.begin(), send_buf_.end() - 1, data_rand_(rand_engine_));
+    *(send_buf_.rbegin()) = '\n';
     socket_.set_option(boost::asio::ip::tcp::no_delay(true));
     read_staff(boost::system::error_code());
     send_staff(boost::system::error_code());
@@ -116,11 +115,11 @@ private:
     if (errored_) {
       return;
     }
-    exch_timer_.expires_from_now(boost::posix_time::microseconds(exch_rand_(rand_engine_) % (2 * send_each_mcs)));
+    exch_timer_.expires_from_now(boost::posix_time::microseconds(exch_rand_(rand_engine_)));
     exch_timer_.async_wait(std::bind(
         &connection_handler::send_staff, shared_from_this(), std::placeholders::_1));
     tqueue_.push(timer());
-    boost::asio::async_write(socket_, boost::asio::mutable_buffers_1(send_buf_, 32), std::bind(
+    boost::asio::async_write(socket_, boost::asio::buffer(send_buf_), std::bind(
         &connection_handler::stub, shared_from_this(), std::placeholders::_1));
   }
 
@@ -144,8 +143,8 @@ private:
       ++exchange_errors;
       return;
     }
-    memset(read_buf_, 0, 33);
-    boost::asio::async_read(socket_, boost::asio::mutable_buffers_1(read_buf_, 32), std::bind(
+    std::fill(read_buf_.begin(), read_buf_.end(), 0);
+    boost::asio::async_read(socket_, boost::asio::buffer(read_buf_), std::bind(
         &connection_handler::compare_staff, shared_from_this(), std::placeholders::_1, std::placeholders::_2));
   }
 
@@ -153,7 +152,8 @@ private:
     if (errored_) {
       return;
     }
-    if (e || transferred != 32 || strncmp(send_buf_, read_buf_, 32)) {
+    if (e || transferred != 32 || !std::equal(send_buf_.begin(), send_buf_.end(),
+        read_buf_.begin(), read_buf_.end())) {
       errored_ = true;
       ++exchange_errors;
       return;
@@ -175,8 +175,8 @@ private:
   boost::asio::ip::tcp::socket socket_;
   boost::asio::deadline_timer bear_timer_;
   boost::asio::deadline_timer exch_timer_;
-  char send_buf_[33];
-  char read_buf_[33];
+  std::array<char, buffer_size> send_buf_;
+  std::array<char, buffer_size> read_buf_;
   timer connect_timer_;
   bool errored_;
   std::queue<timer> tqueue_;
@@ -203,7 +203,7 @@ int main(int args, char** argv) {
   }
   std::string host = argv[1];
   std::string port = args > 2 ? argv[2] : "32000";
-  thread_num = static_cast<std::size_t>(args > 3 ? std::atol(argv[3]) : 24);
+  thread_num = static_cast<std::size_t>(args > 3 ? std::atoi(argv[3]) : 24);
   std::random_device random_device;
   std::mt19937 rand_engine(random_device());
   std::vector<std::thread> threads;
