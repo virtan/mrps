@@ -66,9 +66,11 @@ public:
     bear_timer_(my_service_, boost::posix_time::microseconds(bear_after_mcs)),
     exch_timer_(my_service_),
     errored_(false),
+    send_in_progress_(false),
+    start_send_after_send_completes_(false),
     rand_engine_(rand_engine),
     data_rand_(0, RAND_MAX),
-    exch_rand_(0, 2 * send_each_mcs) {}
+    exchange_rand_(0, 2 * send_each_mcs) {}
 
   void start() {
     if (service_id_ >= clients_max) {
@@ -106,24 +108,30 @@ private:
     std::fill(send_buf_.begin(), send_buf_.end() - 1, data_rand_(rand_engine_));
     *(send_buf_.rbegin()) = '\n';
     socket_.set_option(boost::asio::ip::tcp::no_delay(true));
-    read_staff(boost::system::error_code());
-    send_staff(boost::system::error_code());
+    start_read(boost::system::error_code());
+    start_send(boost::system::error_code());
   }
 
-  void send_staff(const boost::system::error_code& e) {
+  void start_send(const boost::system::error_code& e) {
     assert(!e);
     if (errored_) {
       return;
     }
-    exch_timer_.expires_from_now(boost::posix_time::microseconds(exch_rand_(rand_engine_)));
+    if (send_in_progress_) {
+      start_send_after_send_completes_ = true;
+      return;
+    }
+    exch_timer_.expires_from_now(boost::posix_time::microseconds(exchange_rand_(rand_engine_)));
     exch_timer_.async_wait(std::bind(
-        &connection_handler::send_staff, shared_from_this(), std::placeholders::_1));
-    tqueue_.push(timer());
+        &connection_handler::start_send, shared_from_this(), std::placeholders::_1));
+    timer_queue_.push(timer());
     boost::asio::async_write(socket_, boost::asio::buffer(send_buf_), std::bind(
-        &connection_handler::stub, shared_from_this(), std::placeholders::_1));
+        &connection_handler::handle_send, shared_from_this(), std::placeholders::_1));
+    send_in_progress_ = true;
   }
 
-  void stub(const boost::system::error_code& e) {
+  void handle_send(const boost::system::error_code& e) {
+    send_in_progress_ = false;
     if (errored_) {
       return;
     }
@@ -132,9 +140,13 @@ private:
       ++exchange_errors;
       return;
     }
+    if (start_send_after_send_completes_) {
+      start_send_after_send_completes_ = false;
+      start_send(boost::system::error_code());
+    }
   }
 
-  void read_staff(const boost::system::error_code& e) {
+  void start_read(const boost::system::error_code& e) {
     if (errored_) {
       return;
     }
@@ -145,10 +157,10 @@ private:
     }
     std::fill(read_buf_.begin(), read_buf_.end(), 0);
     boost::asio::async_read(socket_, boost::asio::buffer(read_buf_), std::bind(
-        &connection_handler::compare_staff, shared_from_this(), std::placeholders::_1, std::placeholders::_2));
+        &connection_handler::handle_read, shared_from_this(), std::placeholders::_1, std::placeholders::_2));
   }
 
-  void compare_staff(const boost::system::error_code& e, std::size_t transferred) {
+  void handle_read(const boost::system::error_code& e, std::size_t transferred) {
     if (errored_) {
       return;
     }
@@ -158,8 +170,8 @@ private:
       ++exchange_errors;
       return;
     }
-    std::size_t spent_mcs = tqueue_.front().current();
-    tqueue_.pop();
+    std::size_t spent_mcs = timer_queue_.front().current();
+    timer_queue_.pop();
     if (spent_mcs > client_timeout_mcs) {
       errored_ = true;
       ++exchange_errors;
@@ -167,7 +179,7 @@ private:
     }
     ++msgs;
     latency_summ_mcs += spent_mcs;
-    read_staff(e);
+    start_read(e);
   }
 
   std::size_t service_id_;
@@ -179,10 +191,12 @@ private:
   std::array<char, buffer_size> read_buf_;
   timer connect_timer_;
   bool errored_;
-  std::queue<timer> tqueue_;
+  bool send_in_progress_;
+  bool start_send_after_send_completes_;
+  std::queue<timer> timer_queue_;
   std::mt19937 rand_engine_;
   std::uniform_int_distribution<int> data_rand_;
-  std::uniform_int_distribution<int> exch_rand_;
+  std::uniform_int_distribution<int> exchange_rand_;
 };
 
 void print_stat(bool final = false) {
