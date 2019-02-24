@@ -391,7 +391,7 @@ void print_stat(bool final = false) {
 
 int main(int args, char** argv) {
   if (args < 2) {
-    std::cout << "Usage: " << argv[0] << " <host> [port = 32000 [threads = 24]]" << std::endl;
+    std::cerr << "Usage: " << argv[0] << " <host> [port = 32000 [threads = 24]]" << std::endl;
     return EXIT_FAILURE;
   }
   std::string host = argv[1];
