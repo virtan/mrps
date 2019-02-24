@@ -30,8 +30,8 @@ std::atomic_size_t children(0);
 std::atomic_size_t connection_active(0);
 std::atomic_size_t connection_errors(0);
 std::atomic_size_t exchange_errors(0);
-std::atomic_size_t connection_summ_mcs(0);
-std::atomic_size_t latency_summ_mcs(0);
+std::atomic_size_t connection_sum_mcs(0);
+std::atomic_size_t latency_sum_mcs(0);
 std::atomic_size_t msgs(0);
 
 class timer {
@@ -67,10 +67,15 @@ public:
     exch_timer_(my_service_),
     errored_(false),
     send_in_progress_(false),
-    start_send_after_send_completes_(false),
+    start_send_when_send_completes_(false),
+    exchange_timer_wait_in_progress_(false),
+    start_exchange_timer_wait_when_wait_completes_(false),
     rand_engine_(rand_engine),
     data_rand_(0, RAND_MAX),
-    exchange_rand_(0, 2 * send_each_mcs) {}
+    exchange_rand_(0, send_each_mcs) {
+    std::fill(send_buf_.begin(), send_buf_.end() - 1, data_rand_(rand_engine_));
+    *(send_buf_.rbegin()) = '\n';
+  }
 
   void start() {
     if (service_id_ >= clients_max) {
@@ -102,28 +107,23 @@ private:
     if (spent_mcs > client_timeout_mcs) {
       errored_ = true;
       ++connection_errors;
+      stop_operations();
       return;
     }
-    connection_summ_mcs += spent_mcs;
-    std::fill(send_buf_.begin(), send_buf_.end() - 1, data_rand_(rand_engine_));
-    *(send_buf_.rbegin()) = '\n';
+    connection_sum_mcs += spent_mcs;
     socket_.set_option(boost::asio::ip::tcp::no_delay(true));
-    start_read(boost::system::error_code());
-    start_send(boost::system::error_code());
+    socket_.set_option(boost::asio::socket_base::linger(true, 0));
+    start_read();
+    start_send();
   }
 
-  void start_send(const boost::system::error_code& e) {
-    assert(!e);
-    if (errored_) {
-      return;
-    }
+  void start_send() {
     if (send_in_progress_) {
-      start_send_after_send_completes_ = true;
+      start_send_when_send_completes_ = true;
       return;
     }
     exch_timer_.expires_from_now(boost::posix_time::microseconds(exchange_rand_(rand_engine_)));
-    exch_timer_.async_wait(std::bind(
-        &connection_handler::start_send, shared_from_this(), std::placeholders::_1));
+    start_exchange_timer_wait();
     timer_queue_.push(timer());
     boost::asio::async_write(socket_, boost::asio::buffer(send_buf_), std::bind(
         &connection_handler::handle_send, shared_from_this(), std::placeholders::_1));
@@ -138,21 +138,47 @@ private:
     if (e) {
       errored_ = true;
       ++exchange_errors;
+      stop_operations();
       return;
     }
-    if (start_send_after_send_completes_) {
-      start_send_after_send_completes_ = false;
-      start_send(boost::system::error_code());
+    if (start_send_when_send_completes_) {
+      start_send_when_send_completes_ = false;
+      start_send();
     }
   }
 
-  void start_read(const boost::system::error_code& e) {
+  void handle_exchange_timer(const boost::system::error_code& e) {
+    exchange_timer_wait_in_progress_ = false;
     if (errored_) {
       return;
     }
-    if (e) {
+    if (e && e != boost::asio::error::operation_aborted) {
       errored_ = true;
-      ++exchange_errors;
+      stop_operations();
+      return;
+    }
+    if (start_exchange_timer_wait_when_wait_completes_) {
+      start_exchange_timer_wait_when_wait_completes_ = false;
+      start_exchange_timer_wait();
+      return;
+    }
+    if (e != boost::asio::error::operation_aborted) {
+      start_send();
+    }
+  }
+
+  void start_exchange_timer_wait() {
+    if (exchange_timer_wait_in_progress_) {
+      start_exchange_timer_wait_when_wait_completes_ = true;
+      return;
+    }
+    exch_timer_.async_wait(std::bind(&connection_handler::handle_exchange_timer,
+        shared_from_this(), std::placeholders::_1));
+    exchange_timer_wait_in_progress_ = true;
+  }
+
+  void start_read() {
+    if (errored_) {
       return;
     }
     std::fill(read_buf_.begin(), read_buf_.end(), 0);
@@ -168,6 +194,7 @@ private:
         read_buf_.begin(), read_buf_.end())) {
       errored_ = true;
       ++exchange_errors;
+      stop_operations();
       return;
     }
     std::size_t spent_mcs = timer_queue_.front().current();
@@ -175,11 +202,18 @@ private:
     if (spent_mcs > client_timeout_mcs) {
       errored_ = true;
       ++exchange_errors;
+      stop_operations();
       return;
     }
     ++msgs;
-    latency_summ_mcs += spent_mcs;
-    start_read(e);
+    latency_sum_mcs += spent_mcs;
+    start_read();
+  }
+
+  void stop_operations() {
+    boost::system::error_code ignored;
+    socket_.close(ignored);
+    exch_timer_.cancel(ignored);
   }
 
   std::size_t service_id_;
@@ -192,7 +226,9 @@ private:
   timer connect_timer_;
   bool errored_;
   bool send_in_progress_;
-  bool start_send_after_send_completes_;
+  bool start_send_when_send_completes_;
+  bool exchange_timer_wait_in_progress_;
+  bool start_exchange_timer_wait_when_wait_completes_;
   std::queue<timer> timer_queue_;
   std::mt19937 rand_engine_;
   std::uniform_int_distribution<int> data_rand_;
@@ -203,8 +239,8 @@ void print_stat(bool final = false) {
   if (final) {
     std::cout << "\nFinal statistics:\n";
   }
-  std::size_t conn_avg = connection_summ_mcs / (std::max)((std::size_t) children - connection_errors, (std::size_t) 1);
-  std::size_t lat_avg = latency_summ_mcs / (std::max)((std::size_t) msgs, (std::size_t) 1);
+  std::size_t conn_avg = connection_sum_mcs / (std::max)((std::size_t) children - connection_errors, (std::size_t) 1);
+  std::size_t lat_avg = latency_sum_mcs / (std::max)((std::size_t) msgs, (std::size_t) 1);
   std::cout << "Chld: " << children << " ConnErr: " << (final ? connection_errors + connection_active : static_cast<std::size_t>(connection_errors)) << " ExchErr: " << exchange_errors << " ConnAvg: " << (((double) conn_avg) / 1000) << "ms LatAvg: " << (((double) lat_avg) / 1000) << "ms  Msgs: " << msgs << "\n";
 }
 
