@@ -142,6 +142,7 @@ std::vector<std::unique_ptr<boost::asio::io_service>> services;
 std::atomic_size_t services_index(0);
 boost::asio::ip::tcp::resolver::iterator connect_to;
 
+std::atomic_bool stopped(false);
 std::atomic_size_t children(0);
 std::atomic_size_t connection_active(0);
 std::atomic_size_t connection_errors(0);
@@ -198,7 +199,7 @@ public:
       return;
     }
     bear_timer_.async_wait(make_custom_alloc_handler(bear_timer_allocator_,
-        std::bind(&connection_handler::start_new_connection, shared_from_this(),
+        std::bind(&connection_handler::handle_bear_timer, shared_from_this(),
             std::placeholders::_1)));
     connect_timer_.reset();
     ++connection_active;
@@ -208,13 +209,19 @@ public:
   }
 
 private:
-  void start_new_connection(const boost::system::error_code& e) {
+  void handle_bear_timer(const boost::system::error_code& e) {
+    if (stopped) {
+      return;
+    }
     if (!e) {
       std::make_shared<connection_handler>(rand_engine_)->start();
     }
   }
 
   void handle_connect(const boost::system::error_code& e) {
+    if (stopped) {
+      return;
+    }
     ++children;
     --connection_active;
     if (e) {
@@ -254,6 +261,9 @@ private:
 
   void handle_write(const boost::system::error_code& e) {
     write_in_progress_ = false;
+    if (stopped) {
+      return;
+    }
     if (errored_) {
       return;
     }
@@ -271,6 +281,9 @@ private:
 
   void handle_exchange_timer(const boost::system::error_code& e) {
     exchange_timer_wait_in_progress_ = false;
+    if (stopped) {
+      return;
+    }
     if (errored_) {
       return;
     }
@@ -301,9 +314,6 @@ private:
   }
 
   void start_read() {
-    if (errored_) {
-      return;
-    }
     std::fill(read_buf_.begin(), read_buf_.end(), 0);
     boost::asio::async_read(socket_, boost::asio::buffer(read_buf_),
         make_custom_alloc_handler(read_allocator_, std::bind(
@@ -312,6 +322,9 @@ private:
   }
 
   void handle_read(const boost::system::error_code& e, std::size_t transferred) {
+    if (stopped) {
+      return;
+    }
     if (errored_) {
       return;
     }
@@ -406,6 +419,7 @@ int main(int args, char** argv) {
     print_stat();
     std::this_thread::sleep_for(std::chrono::seconds(5));
   }
+  stopped = true;
   std::for_each(services.begin(), services.end(), [](std::unique_ptr<boost::asio::io_service>& s) {
     s->stop();
   });
