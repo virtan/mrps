@@ -1,26 +1,28 @@
 #!/bin/sh
 
-if [[ "$#" -lt 2 ]]; then
-  echo "Usage: $0 host port [number-of-threads = 24 [number-of-iteration = 16 [client-docker-image]]]" >&2
+set -e
+
+if [[ "${#}" -lt 2 ]]; then
+  echo "Usage: ${0} host port [number-of-threads = 24 [number-of-iteration = 16 [client-docker-image]]]" >&2
   exit 1
 fi
 
 target_host="${1}"
 target_port=${2}
 
-if [[ "$#" -ge 3 ]]; then
+if [[ "${#}" -ge 3 ]]; then
   work_threads=${3}
 else
   work_threads=24
 fi
 
-if [[ "$#" -ge 4 ]]; then
+if [[ "${#}" -ge 4 ]]; then
   run_iterations=${4}
 else
   run_iterations=16
 fi
 
-if [[ "$#" -ge 5 ]]; then
+if [[ "${#}" -ge 5 ]]; then
   docker_image="${5}"
 else
   docker_image="abrarov/client-cpp-virtan"
