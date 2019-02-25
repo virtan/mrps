@@ -1,12 +1,18 @@
 #include <iostream>
 #include <vector>
 #include <memory>
+#include <array>
+#include <string>
 #include <utility>
 #include <functional>
 #include <thread>
 #include <type_traits>
 #include <algorithm>
+#include <cstdlib>
 #include <boost/asio.hpp>
+#include <boost/numeric/conversion/cast.hpp>
+
+namespace {
 
 template <typename Context>
 void* allocate(std::size_t size, Context& context) {
@@ -42,7 +48,7 @@ public:
 
   void* allocate(std::size_t size) {
     if (in_use_ || size > alloc_size) {
-        return 0;
+      return 0;
     }
     in_use_ = true;
     return std::addressof(storage_);
@@ -50,7 +56,7 @@ public:
 
   void deallocate(void* p) {
     if (p) {
-        in_use_ = false;
+      in_use_ = false;
     }
   }
 
@@ -69,7 +75,7 @@ public:
 
   template <typename H>
   custom_alloc_handler(Allocator& allocator, H&& handler):
-    allocator_(std::addressof(allocator)), handler_(std::forward<H>(handler)) {}
+      allocator_(std::addressof(allocator)), handler_(std::forward<H>(handler)) {}
 
   friend void* asio_handler_allocate(std::size_t size, this_type* context) {
     if (void* p = context->allocator_->allocate(size)) {
@@ -117,7 +123,7 @@ private:
 };
 
 template <typename Allocator, typename Handler>
-inline custom_alloc_handler<Allocator, typename std::decay<Handler>::type>
+custom_alloc_handler<Allocator, typename std::decay<Handler>::type>
 make_custom_alloc_handler(Allocator& allocator, Handler&& handler) {
   typedef typename std::decay<Handler>::type handler_type;
   return custom_alloc_handler<Allocator, handler_type>(allocator, std::forward<Handler>(handler));
@@ -133,7 +139,7 @@ public:
   ~connection() = default;
 
   void start() {
-    socket_.async_read_some(boost::asio::buffer(data_, max_length),
+    socket_.async_read_some(boost::asio::buffer(data_),
         make_custom_alloc_handler(allocator_, std::bind(&connection::read, this,
             std::placeholders::_1, std::placeholders::_2)));
   }
@@ -153,7 +159,7 @@ private:
     }
   }
 
-  void write(const boost::system::error_code &e) {
+  void write(const boost::system::error_code& e) {
     if (e) {
       delete this;
     } else {
@@ -162,8 +168,7 @@ private:
   }
 
   handler_allocator<128> allocator_;
-  enum { max_length = 4096 };
-  char data_[max_length];
+  std::array<char, 4096> data_;
   boost::asio::ip::tcp::socket socket_;
 };
 
@@ -174,8 +179,8 @@ private:
 
 public:
   acceptor(boost::asio::io_service& service,
-      boost::asio::ip::tcp::acceptor::native_handle_type native_acceptor) :
-    service_(service), acceptor_(service_, boost::asio::ip::tcp::v4(), native_acceptor) {
+      const boost::asio::ip::tcp::acceptor::native_handle_type& native_acceptor) :
+      service_(service), acceptor_(service_, boost::asio::ip::tcp::v4(), native_acceptor) {
     start_accept();
   }
 
@@ -183,12 +188,12 @@ public:
 
 private:
   void start_accept() {
-    connection *c = new connection(service_);
+    connection* c = new connection(service_);
     acceptor_.async_accept(c->socket(), make_custom_alloc_handler(allocator_,
         std::bind(&acceptor::accept, this, c, std::placeholders::_1)));
   }
 
-  void accept(connection *c, const boost::system::error_code& e) {
+  void accept(connection* c, const boost::system::error_code& e) {
     if (e) {
       delete c;
     } else {
@@ -202,13 +207,34 @@ private:
   handler_allocator<256> allocator_;
 };
 
+#if BOOST_VERSION >= 106600
+
+typedef int io_context_concurrency_hint;
+
+io_context_concurrency_hint to_io_context_concurrency_hint(std::size_t hint) {
+  return 1 == hint ? BOOST_ASIO_CONCURRENCY_HINT_UNSAFE_IO
+      : boost::numeric_cast<io_context_concurrency_hint>(hint);
+}
+
+#else // BOOST_VERSION >= 106600
+
+typedef std::size_t io_context_concurrency_hint;
+
+io_context_concurrency_hint to_io_context_concurrency_hint(std::size_t hint) {
+  return hint;
+}
+
+#endif // BOOST_VERSION >= 106600
+
+} // anonymous namespace
+
 int main(int args, char** argv) {
-  if(args < 2) {
-    std::cout << "Usage: " << argv[0] << " <port> [threads = 24]" << std::endl;
-    return 1;
+  if (args < 2) {
+    std::cerr << "Usage: " << argv[0] << " <port> [threads = 24]" << std::endl;
+    return EXIT_FAILURE;
   }
-  unsigned short port = std::atoi(argv[1]);
-  std::size_t thread_num = args > 2 ? std::atoi(argv[2]) : 24;
+  unsigned short port = boost::numeric_cast<unsigned short>(std::stoi(argv[1]));
+  std::size_t thread_num = boost::numeric_cast<std::size_t>(args > 2 ? std::stoi(argv[2]) : 24);
   std::vector<std::thread> threads;
   threads.reserve(thread_num);
   boost::asio::io_service fake_s;
@@ -217,11 +243,11 @@ int main(int args, char** argv) {
   auto native_handle = fake_a.native_handle();
   for (std::size_t i = 0; i < thread_num; ++i) {
     threads.emplace_back([native_handle]() {
-      boost::asio::io_service service(1);
+      boost::asio::io_service service(to_io_context_concurrency_hint(1));
       acceptor a(service, native_handle);
       service.run();
     });
   }
   std::for_each(threads.begin(), threads.end(), std::mem_fn(&std::thread::join));
-  return 0;
+  return EXIT_SUCCESS;
 }
