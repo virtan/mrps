@@ -137,15 +137,10 @@ const std::size_t send_each_mcs = 10000;
 const std::size_t client_timeout_mcs = 30 * 1000 * 1000;
 const std::size_t buffer_size = 32;
 
-std::size_t thread_num;
-
 class session;
+typedef std::vector<std::shared_ptr<session>> session_vector;
 
-std::vector<std::unique_ptr<boost::asio::io_service>> services;
-std::vector<std::shared_ptr<session>> sessions;
 std::atomic_size_t session_index(0);
-boost::asio::ip::tcp::resolver::iterator connect_to;
-
 std::atomic_bool stopped(false);
 std::atomic_size_t child_num(0);
 std::atomic_size_t active_connection_num(0);
@@ -197,18 +192,23 @@ public:
     exchange_rand_(0, send_each_mcs) {
     std::fill(write_buf_.begin(), write_buf_.end() - 1, data_rand_(rand_engine_));
     *(write_buf_.rbegin()) = '\n';
+    timer_queue_.reserve(16);
   }
 
-  void async_start() {
+  void async_start(const boost::asio::ip::tcp::resolver::iterator& connect_to, 
+      const session_vector& sessions) {
     my_service_.post(make_custom_alloc_handler(bear_timer_allocator_,
-        std::bind(&session::start, shared_from_this())));
+        std::bind(&session::start, shared_from_this(),
+            connect_to, std::cref(sessions))));
   }
 
 private:
-  void start() {
+  void start(const boost::asio::ip::tcp::resolver::iterator& connect_to,
+      const session_vector& sessions) {
     bear_timer_.expires_from_now(boost::posix_time::microseconds(bear_after_mcs));
     bear_timer_.async_wait(make_custom_alloc_handler(bear_timer_allocator_,
-        std::bind(&session::handle_bear_timer, shared_from_this(), std::placeholders::_1)));
+        std::bind(&session::handle_bear_timer, shared_from_this(),
+            connect_to, std::cref(sessions), std::placeholders::_1)));
     connect_timer_.reset();
     ++active_connection_num;
     boost::asio::async_connect(socket_, connect_to, make_custom_alloc_handler(
@@ -216,7 +216,8 @@ private:
             std::placeholders::_1)));
   }
 
-  void handle_bear_timer(const boost::system::error_code& e) {
+  void handle_bear_timer(const boost::asio::ip::tcp::resolver::iterator& connect_to,
+      const session_vector& sessions, const boost::system::error_code& e) {
     if (stopped) {
       return;
     }
@@ -226,11 +227,12 @@ private:
     if (session_index >= clients_max) {
       return;
     }
-    std::size_t new_session_index = session_index.fetch_add(1);
+    auto new_session_index = session_index.fetch_add(1);
     if (new_session_index >= clients_max) {
       return;
     }
-    sessions[new_session_index]->async_start();
+    auto& new_session = *sessions[new_session_index];
+    new_session.async_start(connect_to, sessions);
   }
 
   void handle_connect(const boost::system::error_code& e) {
@@ -242,9 +244,10 @@ private:
     if (e) {
       errored_ = true;
       ++connection_error_num;
+      stop_operations();
       return;
     }
-    std::size_t spent_mcs = connect_timer_.current();
+    auto spent_mcs = connect_timer_.current();
     if (spent_mcs > client_timeout_mcs) {
       errored_ = true;
       ++connection_error_num;
@@ -266,7 +269,7 @@ private:
     exchange_timer_.expires_from_now(boost::posix_time::microseconds(
         exchange_rand_(rand_engine_)));
     start_exchange_timer_wait();
-    timer_queue_.push(timer());
+    timer_queue_.emplace_back(timer());
     boost::asio::async_write(socket_, boost::asio::buffer(write_buf_),
         make_custom_alloc_handler(write_allocator_, std::bind(
             &session::handle_write, shared_from_this(), std::placeholders::_1)));
@@ -348,8 +351,8 @@ private:
       stop_operations();
       return;
     }
-    std::size_t spent_mcs = timer_queue_.front().current();
-    timer_queue_.pop();
+    auto spent_mcs = timer_queue_.front().current();
+    timer_queue_.erase(timer_queue_.begin());
     if (spent_mcs > client_timeout_mcs) {
       errored_ = true;
       ++exchange_error_num;
@@ -379,7 +382,7 @@ private:
   bool start_write_when_write_completes_;
   bool exchange_timer_wait_in_progress_;
   bool start_exchange_timer_wait_when_wait_completes_;
-  std::queue<timer> timer_queue_;
+  std::vector<timer> timer_queue_;
   std::mt19937 rand_engine_;
   std::uniform_int_distribution<int> data_rand_;
   std::uniform_int_distribution<int> exchange_rand_;
@@ -435,32 +438,35 @@ int main(int args, char** argv) {
   }
   std::string host = argv[1];
   std::string port = args > 2 ? argv[2] : "32000";
-  thread_num = boost::numeric_cast<std::size_t>(args > 3 ? std::stoi(argv[3]) : 24);
+  auto thread_num = boost::numeric_cast<std::size_t>(args > 3 ? std::stoi(argv[3]) : 24);
   std::random_device random_device;
   std::mt19937 rand_engine(random_device());
-  std::vector<std::thread> threads;
+  std::vector<std::unique_ptr<boost::asio::io_service>> services;
   services.reserve(thread_num);
   for (std::size_t i = 0; i < thread_num; ++i) {
     services.emplace_back(std::make_unique<boost::asio::io_service>(
         to_io_context_concurrency_hint(1)));
   }
+  session_vector sessions;
   sessions.reserve(clients_max);
   for (std::size_t i = 0; i < clients_max; ++i) {
     sessions.emplace_back(std::make_shared<session>(
         *services[i % thread_num], rand_engine));
   }
+  std::vector<std::thread> threads;
   threads.reserve(thread_num);
   for (std::size_t i = 0; i < thread_num; ++i) {
-    threads.emplace_back([i] {
-      boost::asio::io_service::work work_guard(*services[i]);
-      services[i]->run();
+    boost::asio::io_service& service = *services[i];
+    threads.emplace_back([&service] {
+      boost::asio::io_service::work work_guard(service);
+      service.run();
     });
   }
   std::cout << "Starting tests" << std::endl;
   boost::asio::ip::tcp::resolver resolver(*services[0]);
   boost::asio::ip::tcp::resolver::query query(host, port);
-  connect_to = resolver.resolve(query);
-  sessions[session_index.fetch_add(1)]->async_start();
+  auto& session = *sessions[session_index.fetch_add(1)];
+  session.async_start(resolver.resolve(query), sessions);
   for (std::size_t i = 0; i < 60; i += 5) {
     print_stat();
     std::this_thread::sleep_for(std::chrono::seconds(5));
@@ -470,8 +476,6 @@ int main(int args, char** argv) {
     s->stop();
   });
   std::for_each(threads.begin(), threads.end(), std::mem_fn(&std::thread::join));
-  threads.clear();
-  sessions.clear();
   print_stat(true);
   return EXIT_SUCCESS;
 }
