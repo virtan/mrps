@@ -133,9 +133,6 @@ const std::size_t send_each_mcs = 10000;
 const std::size_t client_timeout_mcs = 30 * 1000 * 1000;
 const std::size_t buffer_size = 32;
 
-class connection;
-typedef std::vector<std::unique_ptr<connection>> connection_vector;
-
 std::atomic_bool   stopped(false);
 std::atomic_size_t connection_index(0);
 std::atomic_size_t child_num(0);
@@ -171,22 +168,27 @@ private:
   std::chrono::steady_clock::time_point start_time_;
 };
 
-struct connection_handler_storage {
-  connection_handler_storage() = default;
-  ~connection_handler_storage() = default;
-  connection_handler_storage(const connection_handler_storage&) = delete;
-  connection_handler_storage& operator=(const connection_handler_storage&) = delete;
+struct connection_data_storage {
+  connection_data_storage() = default;
+  ~connection_data_storage() = default;
+  connection_data_storage(const connection_data_storage&) = delete;
+  connection_data_storage& operator=(const connection_data_storage&) = delete;
 
   handler_allocator<256> bear_timer_allocator;
   handler_allocator<256> write_allocator;
   handler_allocator<256> read_allocator;
   handler_allocator<256> exchange_timer_allocator;
+  std::array<char, buffer_size> write_buf;
+  std::array<char, buffer_size> read_buf;
 };
+
+class connection;
+typedef std::vector<std::unique_ptr<connection>> connection_vector;
 
 class connection {
 public:
   connection(boost::asio::io_service& service,
-      connection_handler_storage& handler_storage,
+      connection_data_storage& connection_data,
       const std::mt19937& rand_engine) :
     my_service_(service),
     socket_(my_service_),
@@ -200,15 +202,15 @@ public:
     rand_engine_(rand_engine),
     data_rand_(0, RAND_MAX),
     exchange_rand_(0, send_each_mcs),
-    handler_storage_(handler_storage) {
-    std::fill(write_buf_.begin(), write_buf_.end() - 1, data_rand_(rand_engine_));
-    *(write_buf_.rbegin()) = '\n';
+    storage_(connection_data) {
+    std::fill(storage_.write_buf.begin(), storage_.write_buf.end() - 1, data_rand_(rand_engine_));
+    *(storage_.write_buf.rbegin()) = '\n';
     timer_queue_.reserve(16);
   }
 
   void async_start(const boost::asio::ip::tcp::resolver::iterator& connect_to, 
       const connection_vector& connections) {
-    my_service_.post(make_custom_alloc_handler(handler_storage_.bear_timer_allocator,
+    my_service_.post(make_custom_alloc_handler(storage_.bear_timer_allocator,
         std::bind(&connection::start, this, connect_to, std::cref(connections))));
   }
 
@@ -216,13 +218,13 @@ private:
   void start(const boost::asio::ip::tcp::resolver::iterator& connect_to,
       const connection_vector& connections) {
     bear_timer_.expires_from_now(boost::posix_time::microseconds(bear_after_mcs));
-    bear_timer_.async_wait(make_custom_alloc_handler(handler_storage_.bear_timer_allocator,
-        std::bind(&connection::handle_bear_timer, this,
-            connect_to, std::cref(connections), std::placeholders::_1)));
+    bear_timer_.async_wait(make_custom_alloc_handler(storage_.bear_timer_allocator,
+        std::bind(&connection::handle_bear_timer, this, connect_to,
+            std::cref(connections), std::placeholders::_1)));
     connect_timer_.reset();
     ++active_connection_num;
     boost::asio::async_connect(socket_, connect_to, make_custom_alloc_handler(
-        handler_storage_.write_allocator, std::bind(&connection::handle_connect,
+        storage_.write_allocator, std::bind(&connection::handle_connect,
             this, std::placeholders::_1)));
   }
 
@@ -280,8 +282,8 @@ private:
         exchange_rand_(rand_engine_)));
     start_exchange_timer_wait();
     timer_queue_.emplace_back(timer());
-    boost::asio::async_write(socket_, boost::asio::buffer(write_buf_),
-        make_custom_alloc_handler(handler_storage_.write_allocator, std::bind(
+    boost::asio::async_write(socket_, boost::asio::buffer(storage_.write_buf),
+        make_custom_alloc_handler(storage_.write_allocator, std::bind(
             &connection::handle_write, this, std::placeholders::_1)));
     write_in_progress_ = true;
   }
@@ -334,15 +336,15 @@ private:
       start_exchange_timer_wait_when_wait_completes_ = true;
       return;
     }
-    exchange_timer_.async_wait(make_custom_alloc_handler(handler_storage_.exchange_timer_allocator,
+    exchange_timer_.async_wait(make_custom_alloc_handler(storage_.exchange_timer_allocator,
         std::bind(&connection::handle_exchange_timer, this, std::placeholders::_1)));
     exchange_timer_wait_in_progress_ = true;
   }
 
   void start_read() {
-    std::fill(read_buf_.begin(), read_buf_.end(), 0);
-    boost::asio::async_read(socket_, boost::asio::buffer(read_buf_),
-        make_custom_alloc_handler(handler_storage_.read_allocator, std::bind(
+    std::fill(storage_.read_buf.begin(), storage_.read_buf.end(), 0);
+    boost::asio::async_read(socket_, boost::asio::buffer(storage_.read_buf),
+        make_custom_alloc_handler(storage_.read_allocator, std::bind(
             &connection::handle_read, this, std::placeholders::_1, std::placeholders::_2)));
   }
 
@@ -354,8 +356,8 @@ private:
       return;
     }
     if (e || transferred != 32 || !std::equal(
-        write_buf_.begin(), write_buf_.end(),
-        read_buf_.begin(), read_buf_.end())) {
+        storage_.write_buf.begin(), storage_.write_buf.end(),
+        storage_.read_buf.begin(), storage_.read_buf.end())) {
       errored_ = true;
       ++exchange_error_num;
       stop_operations();
@@ -384,8 +386,6 @@ private:
   boost::asio::ip::tcp::socket socket_;
   boost::asio::deadline_timer bear_timer_;
   boost::asio::deadline_timer exchange_timer_;
-  std::array<char, buffer_size> write_buf_;
-  std::array<char, buffer_size> read_buf_;
   timer connect_timer_;
   bool errored_;
   bool write_in_progress_;
@@ -396,7 +396,7 @@ private:
   std::mt19937 rand_engine_;
   std::uniform_int_distribution<int> data_rand_;
   std::uniform_int_distribution<int> exchange_rand_;
-  connection_handler_storage& handler_storage_;
+  connection_data_storage& storage_;
 };
 
 void print_stat(bool final = false) {
@@ -448,10 +448,10 @@ int main(int args, char** argv) {
   auto thread_num = boost::numeric_cast<std::size_t>(args > 3 ? std::stoi(argv[3]) : 24);
   std::random_device random_device;
   std::mt19937 rand_engine(random_device());
-  std::vector<std::unique_ptr<connection_handler_storage>> handler_storage;
-  handler_storage.reserve(clients_max);
+  std::vector<std::unique_ptr<connection_data_storage>> connection_data;
+  connection_data.reserve(clients_max);
   for (std::size_t i = 0; i < clients_max; ++i) {
-    handler_storage.emplace_back(std::make_unique<connection_handler_storage>());
+    connection_data.emplace_back(std::make_unique<connection_data_storage>());
   }
   std::vector<std::unique_ptr<boost::asio::io_service>> services;
   services.reserve(thread_num);
@@ -463,7 +463,7 @@ int main(int args, char** argv) {
   connections.reserve(clients_max);
   for (std::size_t i = 0; i < clients_max; ++i) {
     connections.emplace_back(std::make_unique<connection>(
-        *services[i % thread_num], *handler_storage[i], rand_engine));
+        *services[i % thread_num], *connection_data[i], rand_engine));
   }
   std::vector<std::thread> threads;
   threads.reserve(thread_num);
