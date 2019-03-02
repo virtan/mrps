@@ -34,13 +34,11 @@ void invoke(Function&& function, Context& context) {
 
 template <std::size_t alloc_size>
 class handler_allocator {
-private:
-  handler_allocator(const handler_allocator&) = delete;
-  handler_allocator& operator=(const handler_allocator&) = delete;
-
 public:
   handler_allocator() : in_use_(false) {}
   ~handler_allocator() = default;
+  handler_allocator(const handler_allocator&) = delete;
+  handler_allocator& operator=(const handler_allocator&) = delete;
 
   bool owns(void* p) const {
     return std::addressof(storage_) == p;
@@ -71,8 +69,6 @@ private:
   typedef custom_alloc_handler<Allocator, Handler> this_type;
 
 public:
-  typedef void result_type;
-
   template <typename H>
   custom_alloc_handler(Allocator& allocator, H&& handler):
       allocator_(std::addressof(allocator)), handler_(std::forward<H>(handler)) {}
@@ -130,13 +126,11 @@ make_custom_alloc_handler(Allocator& allocator, Handler&& handler) {
 }
 
 class connection {
-private:
-  connection(const connection&) = delete;
-  connection& operator=(const connection&) = delete;
-
 public:
   explicit connection(boost::asio::io_service& service) : socket_(service) {}
   ~connection() = default;
+  connection(const connection&) = delete;
+  connection& operator=(const connection&) = delete;
 
   void start() {
     socket_.async_read_some(boost::asio::buffer(data_),
@@ -173,10 +167,6 @@ private:
 };
 
 class acceptor {
-private:
-  acceptor(const acceptor&) = delete;
-  acceptor& operator=(const acceptor&) = delete;
-
 public:
   acceptor(boost::asio::io_service& service,
       const boost::asio::ip::tcp::acceptor::native_handle_type& native_acceptor) :
@@ -185,10 +175,12 @@ public:
   }
 
   ~acceptor() = default;
+  acceptor(const acceptor&) = delete;
+  acceptor& operator=(const acceptor&) = delete;
 
 private:
   void start_accept() {
-    connection* c = new connection(service_);
+    auto c = new connection(service_);
     acceptor_.async_accept(c->socket(), make_custom_alloc_handler(allocator_,
         std::bind(&acceptor::accept, this, c, std::placeholders::_1)));
   }
@@ -233,8 +225,8 @@ int main(int args, char** argv) {
     std::cerr << "Usage: " << argv[0] << " <port> [threads = 24]" << std::endl;
     return EXIT_FAILURE;
   }
-  unsigned short port = boost::numeric_cast<unsigned short>(std::stoi(argv[1]));
-  std::size_t thread_num = boost::numeric_cast<std::size_t>(args > 2 ? std::stoi(argv[2]) : 24);
+  auto port = boost::numeric_cast<unsigned short>(std::stoi(argv[1]));
+  auto thread_num = boost::numeric_cast<std::size_t>(args > 2 ? std::stoi(argv[2]) : 24);
   std::vector<std::thread> threads;
   threads.reserve(thread_num);
   boost::asio::io_service fake_s;

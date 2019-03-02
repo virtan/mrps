@@ -36,13 +36,11 @@ void invoke(Function&& function, Context& context) {
 
 template <std::size_t alloc_size>
 class handler_allocator {
-private:
-  handler_allocator(const handler_allocator&) = delete;
-  handler_allocator& operator=(const handler_allocator&) = delete;
-
 public:
   handler_allocator() : in_use_(false) {}
   ~handler_allocator() = default;
+  handler_allocator(const handler_allocator&) = delete;
+  handler_allocator& operator=(const handler_allocator&) = delete;
 
   bool owns(void* p) const {
     return std::addressof(storage_) == p;
@@ -73,8 +71,6 @@ private:
   typedef custom_alloc_handler<Allocator, Handler> this_type;
 
 public:
-  typedef void result_type;
-
   template <typename H>
   custom_alloc_handler(Allocator& allocator, H&& handler):
       allocator_(std::addressof(allocator)), handler_(std::forward<H>(handler)) {}
@@ -137,11 +133,11 @@ const std::size_t send_each_mcs = 10000;
 const std::size_t client_timeout_mcs = 30 * 1000 * 1000;
 const std::size_t buffer_size = 32;
 
-class session;
-typedef std::vector<std::shared_ptr<session>> session_vector;
+class connection;
+typedef std::vector<std::unique_ptr<connection>> connection_vector;
 
-std::atomic_size_t session_index(0);
-std::atomic_bool stopped(false);
+std::atomic_bool   stopped(false);
+std::atomic_size_t connection_index(0);
 std::atomic_size_t child_num(0);
 std::atomic_size_t active_connection_num(0);
 std::atomic_size_t connection_error_num(0);
@@ -175,9 +171,23 @@ private:
   std::chrono::steady_clock::time_point start_time_;
 };
 
-class session : public std::enable_shared_from_this<session> {
+struct connection_handler_storage {
+  connection_handler_storage() = default;
+  ~connection_handler_storage() = default;
+  connection_handler_storage(const connection_handler_storage&) = delete;
+  connection_handler_storage& operator=(const connection_handler_storage&) = delete;
+
+  handler_allocator<256> bear_timer_allocator;
+  handler_allocator<256> write_allocator;
+  handler_allocator<256> read_allocator;
+  handler_allocator<256> exchange_timer_allocator;
+};
+
+class connection {
 public:
-  session(boost::asio::io_service& service, const std::mt19937& rand_engine) :
+  connection(boost::asio::io_service& service,
+      connection_handler_storage& handler_storage,
+      const std::mt19937& rand_engine) :
     my_service_(service),
     socket_(my_service_),
     bear_timer_(my_service_),
@@ -189,50 +199,50 @@ public:
     start_exchange_timer_wait_when_wait_completes_(false),
     rand_engine_(rand_engine),
     data_rand_(0, RAND_MAX),
-    exchange_rand_(0, send_each_mcs) {
+    exchange_rand_(0, send_each_mcs),
+    handler_storage_(handler_storage) {
     std::fill(write_buf_.begin(), write_buf_.end() - 1, data_rand_(rand_engine_));
     *(write_buf_.rbegin()) = '\n';
     timer_queue_.reserve(16);
   }
 
   void async_start(const boost::asio::ip::tcp::resolver::iterator& connect_to, 
-      const session_vector& sessions) {
-    my_service_.post(make_custom_alloc_handler(bear_timer_allocator_,
-        std::bind(&session::start, shared_from_this(),
-            connect_to, std::cref(sessions))));
+      const connection_vector& connections) {
+    my_service_.post(make_custom_alloc_handler(handler_storage_.bear_timer_allocator,
+        std::bind(&connection::start, this, connect_to, std::cref(connections))));
   }
 
 private:
   void start(const boost::asio::ip::tcp::resolver::iterator& connect_to,
-      const session_vector& sessions) {
+      const connection_vector& connections) {
     bear_timer_.expires_from_now(boost::posix_time::microseconds(bear_after_mcs));
-    bear_timer_.async_wait(make_custom_alloc_handler(bear_timer_allocator_,
-        std::bind(&session::handle_bear_timer, shared_from_this(),
-            connect_to, std::cref(sessions), std::placeholders::_1)));
+    bear_timer_.async_wait(make_custom_alloc_handler(handler_storage_.bear_timer_allocator,
+        std::bind(&connection::handle_bear_timer, this,
+            connect_to, std::cref(connections), std::placeholders::_1)));
     connect_timer_.reset();
     ++active_connection_num;
     boost::asio::async_connect(socket_, connect_to, make_custom_alloc_handler(
-        write_allocator_, std::bind(&session::handle_connect, shared_from_this(),
-            std::placeholders::_1)));
+        handler_storage_.write_allocator, std::bind(&connection::handle_connect,
+            this, std::placeholders::_1)));
   }
 
   void handle_bear_timer(const boost::asio::ip::tcp::resolver::iterator& connect_to,
-      const session_vector& sessions, const boost::system::error_code& e) {
+      const connection_vector& connections, const boost::system::error_code& e) {
     if (stopped) {
       return;
     }
     if (e) {
       return;
     }
-    if (session_index >= clients_max) {
+    if (connection_index >= clients_max) {
       return;
     }
-    auto new_session_index = session_index.fetch_add(1);
-    if (new_session_index >= clients_max) {
+    auto new_connection_index = connection_index.fetch_add(1);
+    if (new_connection_index >= clients_max) {
       return;
     }
-    auto& new_session = *sessions[new_session_index];
-    new_session.async_start(connect_to, sessions);
+    auto& new_connection = *connections[new_connection_index];
+    new_connection.async_start(connect_to, connections);
   }
 
   void handle_connect(const boost::system::error_code& e) {
@@ -271,8 +281,8 @@ private:
     start_exchange_timer_wait();
     timer_queue_.emplace_back(timer());
     boost::asio::async_write(socket_, boost::asio::buffer(write_buf_),
-        make_custom_alloc_handler(write_allocator_, std::bind(
-            &session::handle_write, shared_from_this(), std::placeholders::_1)));
+        make_custom_alloc_handler(handler_storage_.write_allocator, std::bind(
+            &connection::handle_write, this, std::placeholders::_1)));
     write_in_progress_ = true;
   }
 
@@ -324,16 +334,16 @@ private:
       start_exchange_timer_wait_when_wait_completes_ = true;
       return;
     }
-    exchange_timer_.async_wait(make_custom_alloc_handler(exchange_timer_allocator_,
-        std::bind(&session::handle_exchange_timer, shared_from_this(), std::placeholders::_1)));
+    exchange_timer_.async_wait(make_custom_alloc_handler(handler_storage_.exchange_timer_allocator,
+        std::bind(&connection::handle_exchange_timer, this, std::placeholders::_1)));
     exchange_timer_wait_in_progress_ = true;
   }
 
   void start_read() {
     std::fill(read_buf_.begin(), read_buf_.end(), 0);
     boost::asio::async_read(socket_, boost::asio::buffer(read_buf_),
-        make_custom_alloc_handler(read_allocator_, std::bind(
-            &session::handle_read, shared_from_this(), std::placeholders::_1, std::placeholders::_2)));
+        make_custom_alloc_handler(handler_storage_.read_allocator, std::bind(
+            &connection::handle_read, this, std::placeholders::_1, std::placeholders::_2)));
   }
 
   void handle_read(const boost::system::error_code& e, std::size_t transferred) {
@@ -386,10 +396,7 @@ private:
   std::mt19937 rand_engine_;
   std::uniform_int_distribution<int> data_rand_;
   std::uniform_int_distribution<int> exchange_rand_;
-  handler_allocator<256> bear_timer_allocator_;
-  handler_allocator<256> write_allocator_;
-  handler_allocator<256> read_allocator_;
-  handler_allocator<256> exchange_timer_allocator_;
+  connection_handler_storage& handler_storage_;
 };
 
 void print_stat(bool final = false) {
@@ -441,17 +448,22 @@ int main(int args, char** argv) {
   auto thread_num = boost::numeric_cast<std::size_t>(args > 3 ? std::stoi(argv[3]) : 24);
   std::random_device random_device;
   std::mt19937 rand_engine(random_device());
+  std::vector<std::unique_ptr<connection_handler_storage>> handler_storage;
+  handler_storage.reserve(clients_max);
+  for (std::size_t i = 0; i < clients_max; ++i) {
+    handler_storage.emplace_back(std::make_unique<connection_handler_storage>());
+  }
   std::vector<std::unique_ptr<boost::asio::io_service>> services;
   services.reserve(thread_num);
   for (std::size_t i = 0; i < thread_num; ++i) {
     services.emplace_back(std::make_unique<boost::asio::io_service>(
         to_io_context_concurrency_hint(1)));
   }
-  session_vector sessions;
-  sessions.reserve(clients_max);
+  connection_vector connections;
+  connections.reserve(clients_max);
   for (std::size_t i = 0; i < clients_max; ++i) {
-    sessions.emplace_back(std::make_shared<session>(
-        *services[i % thread_num], rand_engine));
+    connections.emplace_back(std::make_unique<connection>(
+        *services[i % thread_num], *handler_storage[i], rand_engine));
   }
   std::vector<std::thread> threads;
   threads.reserve(thread_num);
@@ -465,8 +477,8 @@ int main(int args, char** argv) {
   std::cout << "Starting tests" << std::endl;
   boost::asio::ip::tcp::resolver resolver(*services[0]);
   boost::asio::ip::tcp::resolver::query query(host, port);
-  auto& session = *sessions[session_index.fetch_add(1)];
-  session.async_start(resolver.resolve(query), sessions);
+  auto& connection = *connections[connection_index.fetch_add(1)];
+  connection.async_start(resolver.resolve(query), connections);
   for (std::size_t i = 0; i < 60; i += 5) {
     print_stat();
     std::this_thread::sleep_for(std::chrono::seconds(5));
