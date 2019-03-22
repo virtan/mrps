@@ -1,6 +1,6 @@
 FROM alpine:3.9
 
-LABEL name="abrarov/client-cpp-virtan"
+LABEL name="client-cpp-virtan"
 
 ADD ["CMakeLists.txt", "/tmp/client-cpp-virtan/"]
 ADD ["client.cc", "/tmp/client-cpp-virtan/"]
