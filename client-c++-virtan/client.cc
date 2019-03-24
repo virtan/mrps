@@ -436,16 +436,19 @@ io_context_concurrency_hint to_io_context_concurrency_hint(std::size_t hint) {
 
 #endif // BOOST_VERSION >= 106600
 
+const std::size_t print_stats_interval = 5;
+
 } // anonymous namespace
 
 int main(int args, char** argv) {
   if (args < 2) {
-    std::cerr << "Usage: " << argv[0] << " <host> [port = 32000 [threads = 24]]" << std::endl;
+    std::cerr << "Usage: " << argv[0] << " <host> [port = 32000 [threads = 24 [duration_seconds = 60]]]" << std::endl;
     return EXIT_FAILURE;
   }
   std::string host = argv[1];
   std::string port = args > 2 ? argv[2] : "32000";
   auto thread_num = boost::numeric_cast<std::size_t>(args > 3 ? std::stoi(argv[3]) : 24);
+  auto duration = boost::numeric_cast<std::size_t>(args > 4 ? std::stoi(argv[4]) : 60);
   std::random_device random_device;
   std::mt19937 rand_engine(random_device());
   std::vector<std::unique_ptr<connection_data_storage>> connection_data;
@@ -479,9 +482,9 @@ int main(int args, char** argv) {
   boost::asio::ip::tcp::resolver::query query(host, port);
   auto& connection = *connections[connection_index.fetch_add(1)];
   connection.async_start(resolver.resolve(query), connections);
-  for (std::size_t i = 0; i < 60; i += 5) {
+  for (std::size_t i = 0; i < duration; i += print_stats_interval) {
     print_stat();
-    std::this_thread::sleep_for(std::chrono::seconds(5));
+    std::this_thread::sleep_for(std::chrono::seconds(print_stats_interval));
   }
   stopped = true;
   std::for_each(services.begin(), services.end(), [](std::unique_ptr<boost::asio::io_service>& s) {
