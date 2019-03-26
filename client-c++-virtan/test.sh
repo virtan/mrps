@@ -25,7 +25,7 @@ fi
 if [[ "${#}" -ge 5 ]]; then
   docker_image="${5}"
 else
-  docker_image="abrarov/client-cpp-virtan"
+  docker_image="client-cpp-virtan"
 fi
 
 max_msgs=0
