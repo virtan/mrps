@@ -591,14 +591,11 @@ int main(int argc, char* argv[]) {
     std::for_each(threads.begin(), threads.end(), std::mem_fn(&std::thread::join));
     print_stat(true);
     return EXIT_SUCCESS;
-  }
-  catch (const boost::program_options::error& e) {
+  } catch (const boost::program_options::error& e) {
     std::cerr << "Error reading options: " << e.what() << std::endl;
-  }
-  catch (const std::exception& e) {
+  } catch (const std::exception& e) {
     std::cerr << "Unexpected error: " << e.what() << std::endl;
-  }
-  catch (...) {
+  } catch (...) {
     std::cerr << "Unknown error" << std::endl;
   }
   return EXIT_FAILURE;
