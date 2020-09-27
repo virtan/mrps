@@ -3,21 +3,20 @@
 #endif
 
 #include <cstddef>
+#include <cstdlib>
 #include <utility>
-#include <iostream>
-#include <string>
+#include <memory>
 #include <vector>
+#include <string>
 #include <queue>
 #include <functional>
 #include <thread>
 #include <type_traits>
 #include <chrono>
-#include <memory>
 #include <array>
-#include <cstdlib>
 #include <random>
-#include <algorithm>
 #include <exception>
+#include <iostream>
 #include <boost/asio.hpp>
 #include <boost/numeric/conversion/cast.hpp>
 #include <boost/program_options.hpp>
@@ -50,16 +49,16 @@ bool is_continuation(Context& context) {
   return asio_handler_is_continuation(std::addressof(context));
 }
 
-#else  // BOOST_VERSION >= 105400
+#else
 
 template <typename Context>
 bool is_continuation(Context& /*context*/) {
   return false;
 }
 
-#endif // BOOST_VERSION >= 105400
+#endif
 
-}
+} // namespace asio_helpers
 
 namespace {
 
@@ -557,13 +556,13 @@ int main(int argc, char* argv[]) {
     std::vector<std::unique_ptr<boost::asio::io_service>> services;
     services.reserve(thread_num);
     for (std::size_t i = 0; i < thread_num; ++i) {
-      services.emplace_back(std::make_unique<boost::asio::io_service>(
+      services.push_back(std::make_unique<boost::asio::io_service>(
           to_io_context_concurrency_hint(1)));
     }
     connection_vector connections;
     connections.reserve(clients_max);
     for (std::size_t i = 0; i < clients_max; ++i) {
-      connections.emplace_back(std::make_unique<connection>(
+      connections.push_back(std::make_unique<connection>(
           *services[i % thread_num], *connection_data[i], rand_engine));
     }
     std::vector<std::thread> threads;
@@ -585,10 +584,12 @@ int main(int argc, char* argv[]) {
       std::this_thread::sleep_for(std::chrono::seconds(print_stats_interval));
     }
     stopped = true;
-    std::for_each(services.begin(), services.end(), [](std::unique_ptr<boost::asio::io_service>& s) {
-      s->stop();
-    });
-    std::for_each(threads.begin(), threads.end(), std::mem_fn(&std::thread::join));
+    for (auto& service : services) {
+      service->stop();
+    }
+    for (auto& thread : threads) {
+      thread.join();
+    }
     print_stat(true);
     return EXIT_SUCCESS;
   } catch (const boost::program_options::error& e) {

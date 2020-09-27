@@ -3,17 +3,17 @@
 #endif
 
 #include <cstddef>
-#include <iostream>
-#include <vector>
+#include <cstdlib>
+#include <utility>
 #include <memory>
+#include <vector>
 #include <array>
 #include <string>
-#include <utility>
 #include <functional>
 #include <thread>
 #include <type_traits>
-#include <algorithm>
-#include <cstdlib>
+#include <exception>
+#include <iostream>
 #include <boost/asio.hpp>
 #include <boost/numeric/conversion/cast.hpp>
 #include <boost/program_options.hpp>
@@ -46,16 +46,16 @@ bool is_continuation(Context& context) {
   return asio_handler_is_continuation(std::addressof(context));
 }
 
-#else  // BOOST_VERSION >= 105400
+#else
 
 template <typename Context>
 bool is_continuation(Context& /*context*/) {
   return false;
 }
 
-#endif // BOOST_VERSION >= 105400
+#endif
 
-}
+} // namespace asio_helpers
 
 namespace {
 
@@ -156,10 +156,20 @@ make_custom_alloc_handler(Allocator& allocator, Handler&& handler) {
   return custom_alloc_handler<Allocator, handler_type>(allocator, std::forward<Handler>(handler));
 }
 
+template <typename T>
+struct shared_ptr_factory_helper : T {
+
+  template <typename... Arg>
+  explicit shared_ptr_factory_helper(Arg&&... arg) : T(std::forward<Arg>(arg)...) {}
+
+};
+
 class connection : public std::enable_shared_from_this<connection> {
 public:
-  explicit connection(boost::asio::io_service& service) : socket_(service) {}
-  ~connection() = default;
+  static std::shared_ptr<connection> create(boost::asio::io_service& service) {
+    return std::make_shared<shared_ptr_factory_helper<connection>>(service);
+  }
+
   connection(const connection&) = delete;
   connection& operator=(const connection&) = delete;
 
@@ -172,6 +182,10 @@ public:
   boost::asio::ip::tcp::socket& socket() {
     return socket_;
   }
+
+protected:
+  explicit connection(boost::asio::io_service& service) : socket_(service) {}
+  ~connection() = default;
 
 private:
   void read(const boost::system::error_code& e, std::size_t bytes_transferred) {
@@ -195,19 +209,25 @@ private:
 
 class acceptor : public std::enable_shared_from_this<acceptor> {
 public:
-  acceptor(boost::asio::io_service& service,
-      const boost::asio::ip::tcp::acceptor::native_handle_type& native_acceptor) :
-      service_(service), acceptor_(service_, boost::asio::ip::tcp::v4(), native_acceptor) {}
+  static std::shared_ptr<acceptor> create(boost::asio::io_service& service,
+      const boost::asio::ip::tcp::acceptor::native_handle_type& native_acceptor) {
+    return std::make_shared<shared_ptr_factory_helper<acceptor>>(service, native_acceptor);
+  }
 
-  ~acceptor() = default;
   acceptor(const acceptor&) = delete;
   acceptor& operator=(const acceptor&) = delete;
 
   void start() {
-    auto c = std::make_shared<connection>(service_);
+    auto c = connection::create(service_);
     acceptor_.async_accept(c->socket(), make_custom_alloc_handler(allocator_,
         std::bind(&acceptor::accept, shared_from_this(), c, std::placeholders::_1)));
   }
+
+protected:
+  acceptor(boost::asio::io_service& service,
+      const boost::asio::ip::tcp::acceptor::native_handle_type& native_acceptor) :
+      service_(service), acceptor_(service_, boost::asio::ip::tcp::v4(), native_acceptor) {}
+  ~acceptor() = default;
 
 private:
   void accept(const std::shared_ptr<connection>& c, const boost::system::error_code& e) {
@@ -231,7 +251,7 @@ io_context_concurrency_hint to_io_context_concurrency_hint(std::size_t hint) {
       : boost::numeric_cast<io_context_concurrency_hint>(hint);
 }
 
-#else // BOOST_VERSION >= 106600
+#else
 
 typedef std::size_t io_context_concurrency_hint;
 
@@ -239,12 +259,12 @@ io_context_concurrency_hint to_io_context_concurrency_hint(std::size_t hint) {
   return hint;
 }
 
-#endif // BOOST_VERSION >= 106600
+#endif
 
-const char* help_option_name     = "help";
-const char* host_option_name     = "host";
-const char* port_option_name     = "port";
-const char* threads_option_name  = "threads";
+const char* help_option_name    = "help";
+const char* host_option_name    = "host";
+const char* port_option_name    = "port";
+const char* threads_option_name = "threads";
 
 boost::program_options::options_description build_program_options_description() {
   boost::program_options::options_description description("Usage");
@@ -325,7 +345,7 @@ int main(int argc, char* argv[]) {
           to_io_context_concurrency_hint(1)));
       auto& service = **io_services.rbegin();
       threads.emplace_back([native_handle, &service]() {
-        std::make_shared<acceptor>(service, native_handle)->start();
+        acceptor::create(service, native_handle)->start();
         service.run();
       });
     }

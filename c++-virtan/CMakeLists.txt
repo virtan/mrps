@@ -34,7 +34,7 @@ if(MINGW)
 endif()
 
 add_executable(server "server.cc")
-target_compile_features(server PRIVATE cxx_std_11)
+target_compile_features(server PRIVATE cxx_std_11 cxx_auto_type)
 target_compile_definitions(server PRIVATE ${compile_definitions})
 target_include_directories(server PRIVATE ${Boost_INCLUDE_DIRS})
 target_link_libraries(server PRIVATE ${libraries})
