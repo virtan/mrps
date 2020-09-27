@@ -31,13 +31,13 @@ fi
 max_msgs=0
 best_stats=""
 
-echo "Running container from ${docker_image} image ${run_iterations} times with command: ${target_host} ${target_port} ${work_threads}"
+echo "Running container from ${docker_image} image ${run_iterations} times with command: --host \"${target_host}\" --port \"${target_port}\" --threads \"${work_threads}\""
 
 i=0
 while [[ ${i} -lt ${run_iterations} ]]
 do
   #echo "Running iteration #${i}..."
-  stats=$(docker run --rm ${docker_image} ${target_host} ${target_port} ${work_threads} 2>&1 | grep -A 1 "Final statistics" | grep "Chld:")
+  stats=$(docker run --rm "${docker_image}" --host "${target_host}" --port "${target_port}" --threads "${work_threads}" 2>&1 | grep -A 1 "Final statistics" | grep "Chld:")
   #echo "Stats: ${stats}"
   msgs=$(echo "${stats}" | sed -r 's/.*Msgs: ([0-9]+)/\1/')
   if [[ "${msgs}" -gt ${max_msgs} ]]; then

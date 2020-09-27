@@ -20,7 +20,12 @@ cmake --build .
 
 ## Building
 
-Assuming current directory is directory where this file is located
+### Requirements
+
+1. Docker 17.06+ for building
+1. Current directory is directory where this file is located
+
+### Steps to build
 
 ```bash
 docker build -t cpp-virtan .

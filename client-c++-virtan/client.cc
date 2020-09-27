@@ -1,3 +1,9 @@
+#if defined(WIN32)
+#include <tchar.h>
+#endif
+
+#include <cstddef>
+#include <utility>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -11,10 +17,12 @@
 #include <cstdlib>
 #include <random>
 #include <algorithm>
+#include <exception>
 #include <boost/asio.hpp>
 #include <boost/numeric/conversion/cast.hpp>
+#include <boost/program_options.hpp>
 
-namespace {
+namespace asio_helpers {
 
 template <typename Context>
 void* allocate(std::size_t size, Context& context) {
@@ -33,6 +41,27 @@ void invoke(Function&& function, Context& context) {
   using namespace boost::asio;
   asio_handler_invoke(std::forward<Function>(function), std::addressof(context));
 }
+
+#if BOOST_VERSION >= 105400
+
+template <typename Context>
+bool is_continuation(Context& context) {
+  using namespace boost::asio;
+  return asio_handler_is_continuation(std::addressof(context));
+}
+
+#else  // BOOST_VERSION >= 105400
+
+template <typename Context>
+bool is_continuation(Context& /*context*/) {
+  return false;
+}
+
+#endif // BOOST_VERSION >= 105400
+
+}
+
+namespace {
 
 template <std::size_t alloc_size>
 class handler_allocator {
@@ -79,30 +108,34 @@ public:
     if (void* p = context->allocator_->allocate(size)) {
       return p;
     }
-    return allocate(size, context->handler_);
+    return asio_helpers::allocate(size, context->handler_);
   }
 
   friend void asio_handler_deallocate(void* pointer, std::size_t size, this_type* context) {
     if (context->allocator_->owns(pointer)) {
       context->allocator_->deallocate(pointer);
     } else {
-      deallocate(pointer, size, context->handler_);
+      asio_helpers::deallocate(pointer, size, context->handler_);
     }
   }
 
   template <typename Function>
   friend void asio_handler_invoke(Function&& function, this_type* context) {
-    invoke(std::forward<Function>(function), context->handler_);
+    asio_helpers::invoke(std::forward<Function>(function), context->handler_);
   }
 
   template <typename Function>
   friend void asio_handler_invoke(Function& function, this_type* context) {
-    invoke(function, context->handler_);
+    asio_helpers::invoke(function, context->handler_);
   }
 
   template <typename Function>
   friend void asio_handler_invoke(const Function& function, this_type* context) {
-    invoke(function, context->handler_);
+    asio_helpers::invoke(function, context->handler_);
+  }
+
+  friend bool asio_handler_is_continuation(this_type* context) {
+    return asio_helpers::is_continuation(context->handler_);
   }
 
   template <typename... Arg>
@@ -438,59 +471,135 @@ io_context_concurrency_hint to_io_context_concurrency_hint(std::size_t hint) {
 
 const std::size_t print_stats_interval = 5;
 
+const char* help_option_name     = "help";
+const char* host_option_name     = "host";
+const char* port_option_name     = "port";
+const char* threads_option_name  = "threads";
+const char* duration_option_name = "duration";
+
+boost::program_options::options_description build_program_options_description() {
+  boost::program_options::options_description description("Usage");
+  description.add_options()
+      (
+        help_option_name,
+        "produce help message"
+      )
+      (
+        host_option_name,
+        boost::program_options::value<std::string>(),
+        "target host"
+      )
+      (
+        port_option_name,
+        boost::program_options::value<unsigned short>()->default_value(32000),
+        "target port"
+      )
+      (
+        threads_option_name,
+        boost::program_options::value<std::size_t>()->default_value(24),
+        "number of threads"
+      )
+      (
+        duration_option_name,
+        boost::program_options::value<std::size_t>()->default_value(60),
+        "duration, seconds"
+      );
+  return std::move(description);
+}
+
+#if defined(WIN32)
+boost::program_options::variables_map parse_program_options(
+    const boost::program_options::options_description& options_description,
+    int argc, _TCHAR* argv[]) {
+#else
+boost::program_options::variables_map parse_program_options(
+    const boost::program_options::options_description& options_description,
+    int argc, char* argv[]) {
+#endif
+  boost::program_options::variables_map values;
+  boost::program_options::store(
+      boost::program_options::parse_command_line(argc, argv, options_description),
+      values);
+  boost::program_options::notify(values);
+  return std::move(values);
+}
+
 } // anonymous namespace
 
-int main(int args, char** argv) {
-  if (args < 2) {
-    std::cerr << "Usage: " << argv[0] << " <host> [port = 32000 [threads = 24 [duration_seconds = 60]]]" << std::endl;
-    return EXIT_FAILURE;
-  }
-  std::string host = argv[1];
-  std::string port = args > 2 ? argv[2] : "32000";
-  auto thread_num = boost::numeric_cast<std::size_t>(args > 3 ? std::stoi(argv[3]) : 24);
-  auto duration = boost::numeric_cast<std::size_t>(args > 4 ? std::stoi(argv[4]) : 60);
-  std::random_device random_device;
-  std::mt19937 rand_engine(random_device());
-  std::vector<std::unique_ptr<connection_data_storage>> connection_data;
-  connection_data.reserve(clients_max);
-  for (std::size_t i = 0; i < clients_max; ++i) {
-    connection_data.emplace_back(std::make_unique<connection_data_storage>());
-  }
-  std::vector<std::unique_ptr<boost::asio::io_service>> services;
-  services.reserve(thread_num);
-  for (std::size_t i = 0; i < thread_num; ++i) {
-    services.emplace_back(std::make_unique<boost::asio::io_service>(
-        to_io_context_concurrency_hint(1)));
-  }
-  connection_vector connections;
-  connections.reserve(clients_max);
-  for (std::size_t i = 0; i < clients_max; ++i) {
-    connections.emplace_back(std::make_unique<connection>(
-        *services[i % thread_num], *connection_data[i], rand_engine));
-  }
-  std::vector<std::thread> threads;
-  threads.reserve(thread_num);
-  for (std::size_t i = 0; i < thread_num; ++i) {
-    boost::asio::io_service& service = *services[i];
-    threads.emplace_back([&service] {
-      boost::asio::io_service::work work_guard(service);
-      service.run();
+#if defined(WIN32)
+int _tmain(int argc, _TCHAR** argv) {
+#else
+int main(int argc, char* argv[]) {
+#endif
+  try {
+    auto po_description = build_program_options_description();
+    auto po_values = parse_program_options(po_description, argc, argv);
+    if (po_values.count(help_option_name)) {
+      std::cout << po_description;
+      return EXIT_SUCCESS;
+    }
+    if (!po_values.count(host_option_name)) {
+      std::cerr << "host is required\n" << po_description;
+      return EXIT_FAILURE;
+    }
+    auto host = po_values[host_option_name].as<std::string>();
+    auto port = po_values[port_option_name].as<unsigned short>();
+    auto thread_num = po_values[threads_option_name].as<std::size_t>();
+    auto duration = po_values[duration_option_name].as<std::size_t>();
+
+    std::random_device random_device;
+    std::mt19937 rand_engine(random_device());
+    std::vector<std::unique_ptr<connection_data_storage>> connection_data;
+    connection_data.reserve(clients_max);
+    for (std::size_t i = 0; i < clients_max; ++i) {
+      connection_data.emplace_back(std::make_unique<connection_data_storage>());
+    }
+    std::vector<std::unique_ptr<boost::asio::io_service>> services;
+    services.reserve(thread_num);
+    for (std::size_t i = 0; i < thread_num; ++i) {
+      services.emplace_back(std::make_unique<boost::asio::io_service>(
+          to_io_context_concurrency_hint(1)));
+    }
+    connection_vector connections;
+    connections.reserve(clients_max);
+    for (std::size_t i = 0; i < clients_max; ++i) {
+      connections.emplace_back(std::make_unique<connection>(
+          *services[i % thread_num], *connection_data[i], rand_engine));
+    }
+    std::vector<std::thread> threads;
+    threads.reserve(thread_num);
+    for (std::size_t i = 0; i < thread_num; ++i) {
+      boost::asio::io_service& service = *services[i];
+      threads.emplace_back([&service] {
+        boost::asio::io_service::work work_guard(service);
+        service.run();
+      });
+    }
+    std::cout << "Starting tests" << std::endl;
+    boost::asio::ip::tcp::resolver resolver(*services[0]);
+    boost::asio::ip::tcp::resolver::query query(host, std::to_string(port));
+    auto& connection = *connections[connection_index.fetch_add(1)];
+    connection.async_start(resolver.resolve(query), connections);
+    for (std::size_t i = 0; i < duration; i += print_stats_interval) {
+      print_stat();
+      std::this_thread::sleep_for(std::chrono::seconds(print_stats_interval));
+    }
+    stopped = true;
+    std::for_each(services.begin(), services.end(), [](std::unique_ptr<boost::asio::io_service>& s) {
+      s->stop();
     });
+    std::for_each(threads.begin(), threads.end(), std::mem_fn(&std::thread::join));
+    print_stat(true);
+    return EXIT_SUCCESS;
   }
-  std::cout << "Starting tests" << std::endl;
-  boost::asio::ip::tcp::resolver resolver(*services[0]);
-  boost::asio::ip::tcp::resolver::query query(host, port);
-  auto& connection = *connections[connection_index.fetch_add(1)];
-  connection.async_start(resolver.resolve(query), connections);
-  for (std::size_t i = 0; i < duration; i += print_stats_interval) {
-    print_stat();
-    std::this_thread::sleep_for(std::chrono::seconds(print_stats_interval));
+  catch (const boost::program_options::error& e) {
+    std::cerr << "Error reading options: " << e.what() << std::endl;
   }
-  stopped = true;
-  std::for_each(services.begin(), services.end(), [](std::unique_ptr<boost::asio::io_service>& s) {
-    s->stop();
-  });
-  std::for_each(threads.begin(), threads.end(), std::mem_fn(&std::thread::join));
-  print_stat(true);
-  return EXIT_SUCCESS;
+  catch (const std::exception& e) {
+    std::cerr << "Unexpected error: " << e.what() << std::endl;
+  }
+  catch (...) {
+    std::cerr << "Unknown error" << std::endl;
+  }
+  return EXIT_FAILURE;
 }

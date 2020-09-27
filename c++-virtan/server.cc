@@ -1,3 +1,8 @@
+#if defined(WIN32)
+#include <tchar.h>
+#endif
+
+#include <cstddef>
 #include <iostream>
 #include <vector>
 #include <memory>
@@ -11,8 +16,9 @@
 #include <cstdlib>
 #include <boost/asio.hpp>
 #include <boost/numeric/conversion/cast.hpp>
+#include <boost/program_options.hpp>
 
-namespace {
+namespace asio_helpers {
 
 template <typename Context>
 void* allocate(std::size_t size, Context& context) {
@@ -31,6 +37,27 @@ void invoke(Function&& function, Context& context) {
   using namespace boost::asio;
   asio_handler_invoke(std::forward<Function>(function), std::addressof(context));
 }
+
+#if BOOST_VERSION >= 105400
+
+template <typename Context>
+bool is_continuation(Context& context) {
+  using namespace boost::asio;
+  return asio_handler_is_continuation(std::addressof(context));
+}
+
+#else  // BOOST_VERSION >= 105400
+
+template <typename Context>
+bool is_continuation(Context& /*context*/) {
+  return false;
+}
+
+#endif // BOOST_VERSION >= 105400
+
+}
+
+namespace {
 
 template <std::size_t alloc_size>
 class handler_allocator {
@@ -77,30 +104,34 @@ public:
     if (void* p = context->allocator_->allocate(size)) {
       return p;
     }
-    return allocate(size, context->handler_);
+    return asio_helpers::allocate(size, context->handler_);
   }
 
   friend void asio_handler_deallocate(void* pointer, std::size_t size, this_type* context) {
     if (context->allocator_->owns(pointer)) {
       context->allocator_->deallocate(pointer);
     } else {
-      deallocate(pointer, size, context->handler_);
+      asio_helpers::deallocate(pointer, size, context->handler_);
     }
   }
 
   template <typename Function>
   friend void asio_handler_invoke(Function&& function, this_type* context) {
-    invoke(std::forward<Function>(function), context->handler_);
+    asio_helpers::invoke(std::forward<Function>(function), context->handler_);
   }
 
   template <typename Function>
   friend void asio_handler_invoke(Function& function, this_type* context) {
-    invoke(function, context->handler_);
+    asio_helpers::invoke(function, context->handler_);
   }
 
   template <typename Function>
   friend void asio_handler_invoke(const Function& function, this_type* context) {
-    invoke(function, context->handler_);
+    asio_helpers::invoke(function, context->handler_);
+  }
+
+  friend bool asio_handler_is_continuation(this_type* context) {
+    return asio_helpers::is_continuation(context->handler_);
   }
 
   template <typename... Arg>
@@ -218,28 +249,99 @@ io_context_concurrency_hint to_io_context_concurrency_hint(std::size_t hint) {
 
 #endif // BOOST_VERSION >= 106600
 
+const char* help_option_name     = "help";
+const char* host_option_name     = "host";
+const char* port_option_name     = "port";
+const char* threads_option_name  = "threads";
+
+boost::program_options::options_description build_program_options_description() {
+  boost::program_options::options_description description("Usage");
+  description.add_options()
+      (
+        help_option_name,
+        "produce help message"
+      )
+      (
+        host_option_name,
+        boost::program_options::value<std::string>()->default_value(
+            boost::asio::ip::address_v4::any().to_string()),
+        "address to listen"
+      )
+      (
+        port_option_name,
+        boost::program_options::value<unsigned short>(),
+        "port to listen"
+      )
+      (
+        threads_option_name,
+        boost::program_options::value<std::size_t>()->default_value(24),
+        "number of threads"
+      );
+  return std::move(description);
+}
+
+#if defined(WIN32)
+boost::program_options::variables_map parse_program_options(
+    const boost::program_options::options_description& options_description,
+    int argc, _TCHAR* argv[]) {
+#else
+boost::program_options::variables_map parse_program_options(
+    const boost::program_options::options_description& options_description,
+    int argc, char* argv[]) {
+#endif
+  boost::program_options::variables_map values;
+  boost::program_options::store(
+      boost::program_options::parse_command_line(argc, argv, options_description),
+      values);
+  boost::program_options::notify(values);
+  return std::move(values);
+}
+
 } // anonymous namespace
 
-int main(int args, char** argv) {
-  if (args < 2) {
-    std::cerr << "Usage: " << argv[0] << " <port> [threads = 24]" << std::endl;
-    return EXIT_FAILURE;
+#if defined(WIN32)
+int _tmain(int argc, _TCHAR** argv) {
+#else
+int main(int argc, char* argv[]) {
+#endif
+  try {
+    auto po_description = build_program_options_description();
+    auto po_values = parse_program_options(po_description, argc, argv);
+    if (po_values.count(help_option_name)) {
+      std::cout << po_description;
+      return EXIT_SUCCESS;
+    }
+    if (!po_values.count(port_option_name)) {
+      std::cerr << "port is required\n" << po_description;
+      return EXIT_FAILURE;
+    }
+    auto host = po_values[host_option_name].as<std::string>();
+    auto port = po_values[port_option_name].as<unsigned short>();
+    auto thread_num = po_values[threads_option_name].as<std::size_t>();
+    std::vector<std::thread> threads;
+    threads.reserve(thread_num);
+    boost::asio::io_service fake_s;
+    boost::asio::ip::tcp::acceptor fake_a(fake_s, boost::asio::ip::tcp::endpoint(
+        boost::asio::ip::address::from_string(host), port));
+    auto native_handle = fake_a.native_handle();
+    for (std::size_t i = 0; i < thread_num; ++i) {
+      threads.emplace_back([native_handle]() {
+        boost::asio::io_service service(to_io_context_concurrency_hint(1));
+        acceptor a(service, native_handle);
+        service.run();
+      });
+    }
+    std::for_each(threads.begin(), threads.end(), std::mem_fn(&std::thread::join));
+    return EXIT_SUCCESS;
   }
-  auto port = boost::numeric_cast<unsigned short>(std::stoi(argv[1]));
-  auto thread_num = boost::numeric_cast<std::size_t>(args > 2 ? std::stoi(argv[2]) : 24);
-  std::vector<std::thread> threads;
-  threads.reserve(thread_num);
-  boost::asio::io_service fake_s;
-  boost::asio::ip::tcp::acceptor fake_a(fake_s, boost::asio::ip::tcp::endpoint(
-      boost::asio::ip::tcp::v4(), port));
-  auto native_handle = fake_a.native_handle();
-  for (std::size_t i = 0; i < thread_num; ++i) {
-    threads.emplace_back([native_handle]() {
-      boost::asio::io_service service(to_io_context_concurrency_hint(1));
-      acceptor a(service, native_handle);
-      service.run();
-    });
+  catch (const boost::program_options::error& e) {
+    std::cerr << "Error reading options: " << e.what() << std::endl;
   }
-  std::for_each(threads.begin(), threads.end(), std::mem_fn(&std::thread::join));
-  return EXIT_SUCCESS;
+  catch (const std::exception& e) {
+    std::cerr << "Unexpected error: " << e.what() << std::endl;
+  }
+  catch (...) {
+    std::cerr << "Unknown error" << std::endl;
+  }
+  return EXIT_FAILURE;
 }
