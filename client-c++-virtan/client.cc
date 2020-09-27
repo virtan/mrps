@@ -77,7 +77,7 @@ public:
 
   void* allocate(std::size_t size) {
     if (in_use_ || size > alloc_size) {
-      return 0;
+      return nullptr;
     }
     in_use_ = true;
     return std::addressof(storage_);

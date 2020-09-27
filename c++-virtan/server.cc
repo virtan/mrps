@@ -73,7 +73,7 @@ public:
 
   void* allocate(std::size_t size) {
     if (in_use_ || size > alloc_size) {
-      return 0;
+      return nullptr;
     }
     in_use_ = true;
     return std::addressof(storage_);
@@ -156,7 +156,7 @@ make_custom_alloc_handler(Allocator& allocator, Handler&& handler) {
   return custom_alloc_handler<Allocator, handler_type>(allocator, std::forward<Handler>(handler));
 }
 
-class connection {
+class connection : public std::enable_shared_from_this<connection> {
 public:
   explicit connection(boost::asio::io_service& service) : socket_(service) {}
   ~connection() = default;
@@ -165,7 +165,7 @@ public:
 
   void start() {
     socket_.async_read_some(boost::asio::buffer(data_),
-        make_custom_alloc_handler(allocator_, std::bind(&connection::read, this,
+        make_custom_alloc_handler(allocator_, std::bind(&connection::read, shared_from_this(),
             std::placeholders::_1, std::placeholders::_2)));
   }
 
@@ -175,19 +175,15 @@ public:
 
 private:
   void read(const boost::system::error_code& e, std::size_t bytes_transferred) {
-    if (e) {
-      delete this;
-    } else {
+    if (!e) {
       boost::asio::async_write(socket_, boost::asio::buffer(data_, bytes_transferred),
-          make_custom_alloc_handler(allocator_, std::bind(&connection::write, this,
+          make_custom_alloc_handler(allocator_, std::bind(&connection::write, shared_from_this(),
               std::placeholders::_1)));
     }
   }
 
   void write(const boost::system::error_code& e) {
-    if (e) {
-      delete this;
-    } else {
+    if (!e) {
       start();
     }
   }
@@ -197,32 +193,28 @@ private:
   boost::asio::ip::tcp::socket socket_;
 };
 
-class acceptor {
+class acceptor : public std::enable_shared_from_this<acceptor> {
 public:
   acceptor(boost::asio::io_service& service,
       const boost::asio::ip::tcp::acceptor::native_handle_type& native_acceptor) :
-      service_(service), acceptor_(service_, boost::asio::ip::tcp::v4(), native_acceptor) {
-    start_accept();
-  }
+      service_(service), acceptor_(service_, boost::asio::ip::tcp::v4(), native_acceptor) {}
 
   ~acceptor() = default;
   acceptor(const acceptor&) = delete;
   acceptor& operator=(const acceptor&) = delete;
 
-private:
-  void start_accept() {
-    auto c = new connection(service_);
+  void start() {
+    auto c = std::make_shared<connection>(service_);
     acceptor_.async_accept(c->socket(), make_custom_alloc_handler(allocator_,
-        std::bind(&acceptor::accept, this, c, std::placeholders::_1)));
+        std::bind(&acceptor::accept, shared_from_this(), c, std::placeholders::_1)));
   }
 
-  void accept(connection* c, const boost::system::error_code& e) {
-    if (e) {
-      delete c;
-    } else {
+private:
+  void accept(const std::shared_ptr<connection>& c, const boost::system::error_code& e) {
+    if (!e) {
       c->start();
     }
-    start_accept();
+    start();
   }
 
   boost::asio::io_service& service_;
@@ -318,20 +310,35 @@ int main(int argc, char* argv[]) {
     auto host = po_values[host_option_name].as<std::string>();
     auto port = po_values[port_option_name].as<unsigned short>();
     auto thread_num = po_values[threads_option_name].as<std::size_t>();
+    boost::asio::io_service io_service;
+    boost::asio::ip::tcp::acceptor fake_a(io_service,
+        boost::asio::ip::tcp::endpoint(
+            boost::asio::ip::address::from_string(host),
+            port));
+    auto native_handle = fake_a.native_handle();
+    std::vector<std::unique_ptr<boost::asio::io_service>> io_services;
+    io_services.reserve(thread_num);
     std::vector<std::thread> threads;
     threads.reserve(thread_num);
-    boost::asio::io_service fake_s;
-    boost::asio::ip::tcp::acceptor fake_a(fake_s, boost::asio::ip::tcp::endpoint(
-        boost::asio::ip::address::from_string(host), port));
-    auto native_handle = fake_a.native_handle();
     for (std::size_t i = 0; i < thread_num; ++i) {
-      threads.emplace_back([native_handle]() {
-        boost::asio::io_service service(to_io_context_concurrency_hint(1));
-        acceptor a(service, native_handle);
+      io_services.push_back(std::make_unique<boost::asio::io_service>(
+          to_io_context_concurrency_hint(1)));
+      auto& service = **io_services.rbegin();
+      threads.emplace_back([native_handle, &service]() {
+        std::make_shared<acceptor>(service, native_handle)->start();
         service.run();
       });
     }
-    std::for_each(threads.begin(), threads.end(), std::mem_fn(&std::thread::join));
+    boost::asio::signal_set signal_set(io_service, SIGINT, SIGTERM);
+    signal_set.async_wait([&io_services](const boost::system::error_code& /*error*/, int /*signal*/) {
+      for (const auto& service : io_services) {
+        service->stop();
+      }
+    });
+    io_service.run();
+    for (auto& thread : threads) {
+      thread.join();
+    }
     return EXIT_SUCCESS;
   }
   catch (const boost::program_options::error& e) {
