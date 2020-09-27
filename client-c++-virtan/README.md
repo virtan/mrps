@@ -23,12 +23,12 @@ cmake --build .
 ### Requirements
 
 1. Docker 17.06+ for building
-1. Current directory is directory where this file is located
+1. Current directory is directory where this repository is cloned
 
 ### Steps to build
 
 ```bash
-docker build -t client-cpp-virtan .
+docker build -t client-cpp-virtan client-c++-virtan
 ```
 
 ## Running with Docker
