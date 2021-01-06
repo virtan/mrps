@@ -1,212 +1,603 @@
-#include <iostream>
-#include <string>
+#if defined(WIN32)
+#include <tchar.h>
+#endif
+
+#include <cstddef>
+#include <cstdlib>
+#include <utility>
+#include <memory>
 #include <vector>
+#include <string>
 #include <queue>
-#include <boost/thread.hpp>
+#include <functional>
+#include <thread>
+#include <type_traits>
+#include <chrono>
+#include <array>
+#include <random>
+#include <exception>
+#include <iostream>
 #include <boost/asio.hpp>
+#include <boost/numeric/conversion/cast.hpp>
+#include <boost/program_options.hpp>
 
-using namespace std;
-using namespace boost;
-using namespace boost::asio;
-using namespace boost::asio::ip;
+namespace asio_helpers {
 
-const size_t clients_max = 10000;
-const size_t bear_after_mcs = 1000;
-const size_t send_each_mcs = 10000;
-const size_t client_timeout_mcs = 30*1000*1000;
-
-size_t threads_;
-thread *vthreads;
-io_service *services;
-size_t services_i = 0;
-tcp::resolver::iterator connect_to;
-
-volatile size_t children = 0;
-volatile size_t connection_active = 0;
-volatile size_t connection_errors = 0;
-volatile size_t exchange_errors = 0;
-volatile size_t connection_summ_mcs = 0;
-volatile size_t latency_summ_mcs = 0;
-volatile size_t msgs = 0;
-
-class timer {
-    public:
-        timer() { reset(); }
-
-        void start() { gettimeofday(&start_time, NULL); }
-
-        size_t current() {
-            struct timeval now;
-            gettimeofday(&now, NULL);
-            size_t diff = (((size_t) now.tv_sec) * 1000000) + now.tv_usec - (((size_t) start_time.tv_sec) * 1000000) - start_time.tv_usec;
-            return diff;
-        }
-
-        void reset() {
-            start();
-        }
-
-    private:
-        struct timeval start_time;
-};
-
-void servicing(size_t i) {
-    io_service::work worker(services[i]);
-    services[i].run();
+template <typename Context>
+void* allocate(std::size_t size, Context& context) {
+  using namespace boost::asio;
+  return asio_handler_allocate(size, std::addressof(context));
 }
 
-struct connection_handler {
-    connection_handler() :
-        service_id(__sync_fetch_and_add(&services_i, 1)),
-        my_service(services[service_id % threads_]),
-        s(my_service),
-        bear_tmr(my_service, posix_time::microseconds(bear_after_mcs)),
-        exch_tmr(my_service),
-        errored(false)
-    {
-        if(service_id >= clients_max) return;
-        bear_tmr.async_wait(bind(&connection_handler::new_connection_handler, this, asio::placeholders::error));
-        connect_timer.reset();
-        __sync_fetch_and_add(&connection_active, 1);
-        async_connect(s, connect_to, bind(&connection_handler::connect, this, asio::placeholders::error));
-    }
+template <typename Context>
+void deallocate(void* pointer, std::size_t size, Context& context) {
+  using namespace boost::asio;
+  asio_handler_deallocate(pointer, size, std::addressof(context));
+}
 
-    void new_connection_handler(const system::error_code &e) {
-        // cout << "new connection\n";
-        assert(!e);
-        new connection_handler;
-    }
+template <typename Function, typename Context>
+void invoke(Function&& function, Context& context) {
+  using namespace boost::asio;
+  asio_handler_invoke(std::forward<Function>(function), std::addressof(context));
+}
 
-    void connect(const system::error_code &e) {
-        // cout << "connect_staff\n";
-        __sync_fetch_and_add(&children, 1);
-        __sync_fetch_and_sub(&connection_active, 1);
-        if(e) {
-            errored = true;
-            __sync_fetch_and_add(&connection_errors, 1);
-            return;
-        }
-        size_t spent_mcs = connect_timer.current();
-        if(spent_mcs > client_timeout_mcs) {
-            errored = true;
-            __sync_fetch_and_add(&connection_errors, 1);
-            return;
-        }
-        __sync_fetch_and_add(&connection_summ_mcs, spent_mcs);
-        memset(send_buf, ' ', 32);
-        snprintf(send_buf, 32, "%d", rand());
-        send_buf[31] = '\n';
-        send_buf[32] = 0;
-        s.set_option(tcp::no_delay(true));
-        //typedef boost::asio::detail::socket_option::integer<SOL_SOCKET, SO_SNDBUF> snd_buf;
-        //typedef boost::asio::detail::socket_option::integer<SOL_SOCKET, SO_RCVBUF> rcv_buf;
-        //s.set_option(snd_buf(18350));
-        //s.set_option(rcv_buf(18350));
-        read_staff(system::error_code());
-        send_staff(system::error_code());
-    }
+#if BOOST_VERSION >= 105400
 
-    void exchange(const system::error_code &e) {
-        // cout << "exchange_staff\n";
-        assert(!e);
-    }
+template <typename Context>
+bool is_continuation(Context& context) {
+  using namespace boost::asio;
+  return asio_handler_is_continuation(std::addressof(context));
+}
 
-    void send_staff(const system::error_code &e) {
-        // cout << "send_staff\n";
-        assert(!e);
-        if(errored) return;
-        exch_tmr.expires_from_now(posix_time::microseconds(rand() % (2 * send_each_mcs)));
-        exch_tmr.async_wait(bind(&connection_handler::send_staff, this, asio::placeholders::error));
-        tqueue.push(timer());
-        async_write(s, mutable_buffers_1(send_buf, 32), bind(&connection_handler::stub, this, asio::placeholders::error));
-    }
+#else
 
-    void stub(const system::error_code &e) {
-        // cout << "stub\n";
-        if(errored) return;
-        if(e) {
-            // cerr << "send error\n";
-            errored = true;
-            __sync_fetch_and_add(&exchange_errors, 1);
-            return;
-        }
-    }
+template <typename Context>
+bool is_continuation(Context& /*context*/) {
+  return false;
+}
 
-    void read_staff(const system::error_code &e) {
-        // cout << "read_staff\n";
-        if(errored) return;
-        if(e) {
-            errored = true;
-            __sync_fetch_and_add(&exchange_errors, 1);
-            return;
-        }
-        memset(read_buf, 0, 33);
-        async_read(s, mutable_buffers_1(read_buf, 32), bind(&connection_handler::compare_staff, this, asio::placeholders::error, asio::placeholders::bytes_transferred));
-    }
+#endif
 
-    void compare_staff(const system::error_code &e, size_t transferred) {
-        // cout << "compare_staff\n";
-        if(errored) return;
-        if(e || transferred != 32 || strncmp(send_buf, read_buf, 32)) {
-            //if(strncmp(send_buf, read_buf, 32)) cerr << transferred << " \"" << send_buf << "\" != \"" << read_buf << "\"" << endl;
-            errored = true;
-            __sync_fetch_and_add(&exchange_errors, 1);
-            return;
-        }
-        size_t spent_mcs = tqueue.front().current();
-        tqueue.pop();
-        if(spent_mcs > client_timeout_mcs) {
-            errored = true;
-            __sync_fetch_and_add(&exchange_errors, 1);
-            return;
-        }
-        __sync_fetch_and_add(&msgs, 1);
-        __sync_fetch_and_add(&latency_summ_mcs, spent_mcs);
-        read_staff(e);
-    }
+} // namespace asio_helpers
 
-    size_t service_id;
-    io_service &my_service;
-    tcp::socket s;
-    deadline_timer bear_tmr;
-    deadline_timer exch_tmr;
-    char send_buf[33];
-    char read_buf[33];
-    timer connect_timer;
-    timer exchange_timer;
-    bool errored;
-    queue<timer> tqueue;
+namespace {
+
+template <std::size_t alloc_size>
+class handler_allocator {
+public:
+  handler_allocator() : in_use_(false) {}
+  ~handler_allocator() = default;
+  handler_allocator(const handler_allocator&) = delete;
+  handler_allocator& operator=(const handler_allocator&) = delete;
+
+  bool owns(void* p) const {
+    return std::addressof(storage_) == p;
+  }
+
+  void* allocate(std::size_t size) {
+    if (in_use_ || size > alloc_size) {
+      return nullptr;
+    }
+    in_use_ = true;
+    return std::addressof(storage_);
+  }
+
+  void deallocate(void* p) {
+    if (p) {
+      in_use_ = false;
+    }
+  }
+
+private:
+  typename std::aligned_storage<alloc_size>::type storage_;
+  bool in_use_;
+};
+
+template <typename Allocator, typename Handler>
+class custom_alloc_handler {
+private:
+  typedef custom_alloc_handler<Allocator, Handler> this_type;
+
+public:
+  template <typename H>
+  custom_alloc_handler(Allocator& allocator, H&& handler):
+      allocator_(std::addressof(allocator)), handler_(std::forward<H>(handler)) {}
+
+  friend void* asio_handler_allocate(std::size_t size, this_type* context) {
+    if (void* p = context->allocator_->allocate(size)) {
+      return p;
+    }
+    return asio_helpers::allocate(size, context->handler_);
+  }
+
+  friend void asio_handler_deallocate(void* pointer, std::size_t size, this_type* context) {
+    if (context->allocator_->owns(pointer)) {
+      context->allocator_->deallocate(pointer);
+    } else {
+      asio_helpers::deallocate(pointer, size, context->handler_);
+    }
+  }
+
+  template <typename Function>
+  friend void asio_handler_invoke(Function&& function, this_type* context) {
+    asio_helpers::invoke(std::forward<Function>(function), context->handler_);
+  }
+
+  template <typename Function>
+  friend void asio_handler_invoke(Function& function, this_type* context) {
+    asio_helpers::invoke(function, context->handler_);
+  }
+
+  template <typename Function>
+  friend void asio_handler_invoke(const Function& function, this_type* context) {
+    asio_helpers::invoke(function, context->handler_);
+  }
+
+  friend bool asio_handler_is_continuation(this_type* context) {
+    return asio_helpers::is_continuation(context->handler_);
+  }
+
+  template <typename... Arg>
+  void operator()(Arg&&... arg) {
+    handler_(std::forward<Arg>(arg)...);
+  }
+
+  template <typename... Arg>
+  void operator()(Arg&&... arg) const {
+    handler_(std::forward<Arg>(arg)...);
+  }
+
+private:
+  Allocator* allocator_;
+  Handler handler_;
+};
+
+template <typename Allocator, typename Handler>
+custom_alloc_handler<Allocator, typename std::decay<Handler>::type>
+make_custom_alloc_handler(Allocator& allocator, Handler&& handler) {
+  typedef typename std::decay<Handler>::type handler_type;
+  return custom_alloc_handler<Allocator, handler_type>(allocator, std::forward<Handler>(handler));
+}
+
+const std::size_t clients_max = 10000;
+const std::size_t bear_after_mcs = 1000;
+const std::size_t send_each_mcs = 10000;
+const std::size_t client_timeout_mcs = 30 * 1000 * 1000;
+const std::size_t buffer_size = 32;
+
+std::atomic_bool   stopped(false);
+std::atomic_size_t connection_index(0);
+std::atomic_size_t child_num(0);
+std::atomic_size_t active_connection_num(0);
+std::atomic_size_t connection_error_num(0);
+std::atomic_size_t exchange_error_num(0);
+std::atomic_size_t connection_sum_mcs(0);
+std::atomic_size_t latency_sum_mcs(0);
+std::atomic_size_t msg_num(0);
+
+class timer {
+public:
+  timer() {
+    reset();
+  }
+
+  void start() {
+    start_time_ = std::chrono::steady_clock::now();
+  }
+
+  std::size_t current() const {
+    auto now = std::chrono::steady_clock::now();
+    return boost::numeric_cast<std::size_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            now - start_time_).count());
+  }
+
+  void reset() {
+    start();
+  }
+
+private:
+  std::chrono::steady_clock::time_point start_time_;
+};
+
+struct connection_data_storage {
+  connection_data_storage() = default;
+  ~connection_data_storage() = default;
+  connection_data_storage(const connection_data_storage&) = delete;
+  connection_data_storage& operator=(const connection_data_storage&) = delete;
+
+  handler_allocator<256> bear_timer_allocator;
+  handler_allocator<256> write_allocator;
+  handler_allocator<256> read_allocator;
+  handler_allocator<256> exchange_timer_allocator;
+  std::array<char, buffer_size> write_buf;
+  std::array<char, buffer_size> read_buf;
+};
+
+class connection;
+typedef std::vector<std::unique_ptr<connection>> connection_vector;
+
+class connection {
+public:
+  connection(boost::asio::io_service& service,
+      connection_data_storage& connection_data,
+      const std::mt19937& rand_engine) :
+    my_service_(service),
+    socket_(my_service_),
+    bear_timer_(my_service_),
+    exchange_timer_(my_service_),
+    errored_(false),
+    write_in_progress_(false),
+    start_write_when_write_completes_(false),
+    exchange_timer_wait_in_progress_(false),
+    start_exchange_timer_wait_when_wait_completes_(false),
+    rand_engine_(rand_engine),
+    data_rand_(0, RAND_MAX),
+    exchange_rand_(0, send_each_mcs),
+    storage_(connection_data) {
+    std::fill(storage_.write_buf.begin(), storage_.write_buf.end() - 1, data_rand_(rand_engine_));
+    *(storage_.write_buf.rbegin()) = '\n';
+    timer_queue_.reserve(16);
+  }
+
+  void async_start(const boost::asio::ip::tcp::resolver::iterator& connect_to, 
+      const connection_vector& connections) {
+    my_service_.post(make_custom_alloc_handler(storage_.bear_timer_allocator,
+        std::bind(&connection::start, this, connect_to, std::cref(connections))));
+  }
+
+private:
+  void start(const boost::asio::ip::tcp::resolver::iterator& connect_to,
+      const connection_vector& connections) {
+    bear_timer_.expires_from_now(boost::posix_time::microseconds(bear_after_mcs));
+    bear_timer_.async_wait(make_custom_alloc_handler(storage_.bear_timer_allocator,
+        std::bind(&connection::handle_bear_timer, this, connect_to,
+            std::cref(connections), std::placeholders::_1)));
+    connect_timer_.reset();
+    ++active_connection_num;
+    boost::asio::async_connect(socket_, connect_to, make_custom_alloc_handler(
+        storage_.write_allocator, std::bind(&connection::handle_connect,
+            this, std::placeholders::_1)));
+  }
+
+  void handle_bear_timer(const boost::asio::ip::tcp::resolver::iterator& connect_to,
+      const connection_vector& connections, const boost::system::error_code& e) {
+    if (stopped) {
+      return;
+    }
+    if (e) {
+      return;
+    }
+    if (connection_index >= clients_max) {
+      return;
+    }
+    auto new_connection_index = connection_index.fetch_add(1);
+    if (new_connection_index >= clients_max) {
+      return;
+    }
+    auto& new_connection = *connections[new_connection_index];
+    new_connection.async_start(connect_to, connections);
+  }
+
+  void handle_connect(const boost::system::error_code& e) {
+    if (stopped) {
+      return;
+    }
+    ++child_num;
+    --active_connection_num;
+    if (e) {
+      errored_ = true;
+      ++connection_error_num;
+      stop_operations();
+      return;
+    }
+    auto spent_mcs = connect_timer_.current();
+    if (spent_mcs > client_timeout_mcs) {
+      errored_ = true;
+      ++connection_error_num;
+      stop_operations();
+      return;
+    }
+    connection_sum_mcs += spent_mcs;
+    socket_.set_option(boost::asio::ip::tcp::no_delay(true));
+    socket_.set_option(boost::asio::socket_base::linger(true, 0));
+    start_read();
+    start_write();
+  }
+
+  void start_write() {
+    if (write_in_progress_) {
+      start_write_when_write_completes_ = true;
+      return;
+    }
+    exchange_timer_.expires_from_now(boost::posix_time::microseconds(
+        exchange_rand_(rand_engine_)));
+    start_exchange_timer_wait();
+    timer_queue_.emplace_back(timer());
+    boost::asio::async_write(socket_, boost::asio::buffer(storage_.write_buf),
+        make_custom_alloc_handler(storage_.write_allocator, std::bind(
+            &connection::handle_write, this, std::placeholders::_1)));
+    write_in_progress_ = true;
+  }
+
+  void handle_write(const boost::system::error_code& e) {
+    write_in_progress_ = false;
+    if (stopped) {
+      return;
+    }
+    if (errored_) {
+      return;
+    }
+    if (e) {
+      errored_ = true;
+      ++exchange_error_num;
+      stop_operations();
+      return;
+    }
+    if (start_write_when_write_completes_) {
+      start_write_when_write_completes_ = false;
+      start_write();
+    }
+  }
+
+  void handle_exchange_timer(const boost::system::error_code& e) {
+    exchange_timer_wait_in_progress_ = false;
+    if (stopped) {
+      return;
+    }
+    if (errored_) {
+      return;
+    }
+    if (e && e != boost::asio::error::operation_aborted) {
+      errored_ = true;
+      stop_operations();
+      return;
+    }
+    if (start_exchange_timer_wait_when_wait_completes_) {
+      start_exchange_timer_wait_when_wait_completes_ = false;
+      start_exchange_timer_wait();
+      return;
+    }
+    if (e != boost::asio::error::operation_aborted) {
+      start_write();
+    }
+  }
+
+  void start_exchange_timer_wait() {
+    if (exchange_timer_wait_in_progress_) {
+      start_exchange_timer_wait_when_wait_completes_ = true;
+      return;
+    }
+    exchange_timer_.async_wait(make_custom_alloc_handler(storage_.exchange_timer_allocator,
+        std::bind(&connection::handle_exchange_timer, this, std::placeholders::_1)));
+    exchange_timer_wait_in_progress_ = true;
+  }
+
+  void start_read() {
+    std::fill(storage_.read_buf.begin(), storage_.read_buf.end(), 0);
+    boost::asio::async_read(socket_, boost::asio::buffer(storage_.read_buf),
+        make_custom_alloc_handler(storage_.read_allocator, std::bind(
+            &connection::handle_read, this, std::placeholders::_1, std::placeholders::_2)));
+  }
+
+  void handle_read(const boost::system::error_code& e, std::size_t transferred) {
+    if (stopped) {
+      return;
+    }
+    if (errored_) {
+      return;
+    }
+    if (e || transferred != 32 || !std::equal(
+        storage_.write_buf.begin(), storage_.write_buf.end(),
+        storage_.read_buf.begin(), storage_.read_buf.end())) {
+      errored_ = true;
+      ++exchange_error_num;
+      stop_operations();
+      return;
+    }
+    auto spent_mcs = timer_queue_.front().current();
+    timer_queue_.erase(timer_queue_.begin());
+    if (spent_mcs > client_timeout_mcs) {
+      errored_ = true;
+      ++exchange_error_num;
+      stop_operations();
+      return;
+    }
+    ++msg_num;
+    latency_sum_mcs += spent_mcs;
+    start_read();
+  }
+
+  void stop_operations() {
+    boost::system::error_code ignored;
+    socket_.close(ignored);
+    exchange_timer_.cancel(ignored);
+  }
+
+  boost::asio::io_service& my_service_;
+  boost::asio::ip::tcp::socket socket_;
+  boost::asio::deadline_timer bear_timer_;
+  boost::asio::deadline_timer exchange_timer_;
+  timer connect_timer_;
+  bool errored_;
+  bool write_in_progress_;
+  bool start_write_when_write_completes_;
+  bool exchange_timer_wait_in_progress_;
+  bool start_exchange_timer_wait_when_wait_completes_;
+  std::vector<timer> timer_queue_;
+  std::mt19937 rand_engine_;
+  std::uniform_int_distribution<int> data_rand_;
+  std::uniform_int_distribution<int> exchange_rand_;
+  connection_data_storage& storage_;
 };
 
 void print_stat(bool final = false) {
-    if(final) cout << "\nFinal statistics:\n";
-    size_t conn_avg = connection_summ_mcs / max((size_t) children - connection_errors, (size_t) 1);
-    size_t lat_avg = latency_summ_mcs / max((size_t) msgs, (size_t) 1);
-    cout << "Chld: " << children << " ConnErr: " << (final ? connection_errors + connection_active : connection_errors) << " ExchErr: " << exchange_errors << " ConnAvg: " << (((double) conn_avg) / 1000) << "ms LatAvg: " << (((double) lat_avg) / 1000) << "ms  Msgs: " << msgs << "\n";
+  if (final) {
+    std::cout << "\nFinal statistics:\n";
+  }
+  std::size_t conn_avg = connection_sum_mcs / (std::max)(
+      child_num - connection_error_num, static_cast<std::size_t>(1));
+  std::size_t lat_avg = latency_sum_mcs / (std::max)(
+      static_cast<std::size_t>(msg_num), static_cast<std::size_t>(1));
+  std::cout << "Chld: " << child_num
+      << " ConnErr: "
+          << (final ? static_cast<std::size_t>(connection_error_num + active_connection_num)
+              : static_cast<std::size_t>(connection_error_num))
+      << " ExchErr: " << exchange_error_num
+      << " ConnAvg: " << static_cast<double>(conn_avg) / 1000
+      << "ms LatAvg: " << static_cast<double>(lat_avg) / 1000
+      << "ms  Msgs: " << msg_num << "\n";
 }
 
-int main(int args, char **argv) {
-    if(args < 2) {
-        cout << "Usage: " << argv[0] << " <host> [port = 32000 [threads = 24]]" << endl;
-        return 1;
+#if BOOST_VERSION >= 106600
+
+typedef int io_context_concurrency_hint;
+
+io_context_concurrency_hint to_io_context_concurrency_hint(std::size_t hint) {
+  return 1 == hint ? BOOST_ASIO_CONCURRENCY_HINT_UNSAFE_IO
+      : boost::numeric_cast<io_context_concurrency_hint>(hint);
+}
+
+#else // BOOST_VERSION >= 106600
+
+typedef std::size_t io_context_concurrency_hint;
+
+io_context_concurrency_hint to_io_context_concurrency_hint(std::size_t hint) {
+  return hint;
+}
+
+#endif // BOOST_VERSION >= 106600
+
+const std::size_t print_stats_interval = 5;
+
+const char* help_option_name     = "help";
+const char* host_option_name     = "host";
+const char* port_option_name     = "port";
+const char* threads_option_name  = "threads";
+const char* duration_option_name = "duration";
+
+boost::program_options::options_description build_program_options_description() {
+  boost::program_options::options_description description("Usage");
+  description.add_options()
+      (
+        help_option_name,
+        "produce help message"
+      )
+      (
+        host_option_name,
+        boost::program_options::value<std::string>(),
+        "target host"
+      )
+      (
+        port_option_name,
+        boost::program_options::value<unsigned short>()->default_value(32000),
+        "target port"
+      )
+      (
+        threads_option_name,
+        boost::program_options::value<std::size_t>()->default_value(24),
+        "number of threads"
+      )
+      (
+        duration_option_name,
+        boost::program_options::value<std::size_t>()->default_value(60),
+        "duration, seconds"
+      );
+  return std::move(description);
+}
+
+#if defined(WIN32)
+boost::program_options::variables_map parse_program_options(
+    const boost::program_options::options_description& options_description,
+    int argc, _TCHAR* argv[]) {
+#else
+boost::program_options::variables_map parse_program_options(
+    const boost::program_options::options_description& options_description,
+    int argc, char* argv[]) {
+#endif
+  boost::program_options::variables_map values;
+  boost::program_options::store(
+      boost::program_options::parse_command_line(argc, argv, options_description),
+      values);
+  boost::program_options::notify(values);
+  return std::move(values);
+}
+
+} // anonymous namespace
+
+#if defined(WIN32)
+int _tmain(int argc, _TCHAR** argv) {
+#else
+int main(int argc, char* argv[]) {
+#endif
+  try {
+    auto po_description = build_program_options_description();
+    auto po_values = parse_program_options(po_description, argc, argv);
+    if (po_values.count(help_option_name)) {
+      std::cout << po_description;
+      return EXIT_SUCCESS;
     }
-    string host(argv[1]);
-    string port(args > 2 ? argv[2] : "32000");
-    string threads(args > 3 ? argv[3] : "24");
-    threads_ = atoi(threads.c_str());
-    vthreads = new thread[threads_];
-    services = new io_service[threads_];
-    for(size_t i = 0; i < threads_; ++i) vthreads[i] = thread(servicing, i);
-    sleep(1);
-    cout << "Starting tests" << endl;
-    tcp::resolver resolver(services[0]);
-    tcp::resolver::query query(host, port);
-    connect_to = resolver.resolve(query);
-    new connection_handler;
-    for(size_t i = 0; i < 60; i += 5) {
-        print_stat();
-        sleep(5);
+    if (!po_values.count(host_option_name)) {
+      std::cerr << "host is required\n" << po_description;
+      return EXIT_FAILURE;
+    }
+    auto host = po_values[host_option_name].as<std::string>();
+    auto port = po_values[port_option_name].as<unsigned short>();
+    auto thread_num = po_values[threads_option_name].as<std::size_t>();
+    auto duration = po_values[duration_option_name].as<std::size_t>();
+
+    std::random_device random_device;
+    std::mt19937 rand_engine(random_device());
+    std::vector<std::unique_ptr<connection_data_storage>> connection_data;
+    connection_data.reserve(clients_max);
+    for (std::size_t i = 0; i < clients_max; ++i) {
+      connection_data.emplace_back(std::make_unique<connection_data_storage>());
+    }
+    std::vector<std::unique_ptr<boost::asio::io_service>> services;
+    services.reserve(thread_num);
+    for (std::size_t i = 0; i < thread_num; ++i) {
+      services.push_back(std::make_unique<boost::asio::io_service>(
+          to_io_context_concurrency_hint(1)));
+    }
+    connection_vector connections;
+    connections.reserve(clients_max);
+    for (std::size_t i = 0; i < clients_max; ++i) {
+      connections.push_back(std::make_unique<connection>(
+          *services[i % thread_num], *connection_data[i], rand_engine));
+    }
+    std::vector<std::thread> threads;
+    threads.reserve(thread_num);
+    for (std::size_t i = 0; i < thread_num; ++i) {
+      boost::asio::io_service& service = *services[i];
+      threads.emplace_back([&service] {
+        boost::asio::io_service::work work_guard(service);
+        service.run();
+      });
+    }
+    std::cout << "Starting tests" << std::endl;
+    boost::asio::ip::tcp::resolver resolver(*services[0]);
+    boost::asio::ip::tcp::resolver::query query(host, std::to_string(port));
+    auto& connection = *connections[connection_index.fetch_add(1)];
+    connection.async_start(resolver.resolve(query), connections);
+    for (std::size_t i = 0; i < duration; i += print_stats_interval) {
+      print_stat();
+      std::this_thread::sleep_for(std::chrono::seconds(print_stats_interval));
+    }
+    stopped = true;
+    for (auto& service : services) {
+      service->stop();
+    }
+    for (auto& thread : threads) {
+      thread.join();
     }
     print_stat(true);
-    return 0;
+    return EXIT_SUCCESS;
+  } catch (const boost::program_options::error& e) {
+    std::cerr << "Error reading options: " << e.what() << std::endl;
+  } catch (const std::exception& e) {
+    std::cerr << "Unexpected error: " << e.what() << std::endl;
+  } catch (...) {
+    std::cerr << "Unknown error" << std::endl;
+  }
+  return EXIT_FAILURE;
 }
